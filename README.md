@@ -1,82 +1,100 @@
 # BranDuel
 
-BranDuel runs the Degenerate Derby's fixed teams, fictional-dollar economy, betting, results, and game-night closeout. The September 5 reliability build replaces the test identity picker and optimistic local writes with authenticated, server-confirmed actions.
+BranDuel is the Degenerate Derby game-night app. It runs four fixed teams through a fictional-dollar economy, game results, optional betting markets, corrections, and final closeout.
 
-On this Windows machine, start it from the project folder:
+The live application runs on Cloudflare Workers with Cloudflare D1. Source code is maintained in [GitHub](https://github.com/jimmybranley-dp/BranDuel).
+
+## Hosted environments
+
+| Environment | URL | Purpose |
+| --- | --- | --- |
+| Staging | https://branduel-staging.jimmybranley.workers.dev | Rehearsals and device testing |
+| Production | https://branduel-production.jimmybranley.workers.dev | The real Derby |
+
+Cloudflare hosts the Worker, static client, and D1 state. The PC does not need to stay on for either hosted environment. The local checkout is needed for code changes, local testing, migrations, and deployments. Staging and production have separate databases and `PLAYER_PASSCODES` secrets. Never use production for tests that create or close a game night.
+
+## Local development
+
+The project requires Node 24.19.0 or another compatible Node 24 release. The version is pinned in `.nvmrc` and `.node-version`.
+
+On Windows, from the project folder:
 
 ```powershell
 .\Start-BranDuel.ps1
 ```
 
-Open http://127.0.0.1:5173. The helper uses Node 24.19.0 or a compatible Node 24 release, including the bundled Codex runtime when the system Node is older. It applies local migrations before starting Vite. Keep its terminal running. An alternate port can be selected with `-Port 5175`.
+Open `http://127.0.0.1:5173`. Keep the helper terminal running. Use `-Port 5175` when needed.
 
-The eight player passcodes are in `.private-player-passcodes.json`. Give each player only their own value. The app asks for a name and passcode; Jimmy's session receives commissioner controls. Passcodes and session tokens are never part of the browser bundle. Tabs in one browser share its cookie; use separate browser profiles/devices for different players. The server rejects a request when a tab's expected player differs from its authenticated session.
+For a new checkout:
 
-For a new checkout, use the Node version pinned in `.nvmrc` and `.node-version`, then:
-
-```sh
+```powershell
 npm ci
 npm run setup:passcodes
 npm run db:migrate:local
 npm run dev
 ```
 
-Credential setup generates `.dev.vars` containing salted PBKDF2 hashes, `.private-player-hashes.json` for later secret provisioning, and `.private-player-passcodes.json` for the commissioner. These files are ignored by Git. The script refuses to overwrite existing credentials. Changing a player's configured hash invalidates that player's existing sessions. Do not distribute the hash file or raw build directory as party handouts; the Vite plugin includes a local `.dev.vars` copy in the Worker preview output.
+The local credential files are ignored by Git:
 
-The current event rules are:
+- `.dev.vars` contains salted PBKDF2 hashes for the local Worker.
+- `.private-player-hashes.json` is used when provisioning a Cloudflare secret.
+- `.private-player-passcodes.json` contains local player mappings.
 
-- Four fixed teams, each with a shared $10,000,000 opening bankroll. New databases start with opening-grant ledger entries and no demo events.
-- Default house purses: Smash $1,500,000, Boomerang Fu $1,250,000, Worms $1,750,000, Mario Party $3,000,000, Mario Kart $1,500,000, NFL Blitz $1,750,000, Billiards $1,250,000. Each event stores its explicit house purse; participant count does not change it. Losing a match does not debit the losing team's bank. Mario Party has no betting.
-- One open team ticket per market, with self-bet and teammate restrictions. Editing retains the replaced ticket in history and records its refund before the new stake.
-- Scheduled matchups are drafts. Jimmy opens one market at a time; opening freezes its odds, purse, and stake limits. Reopening sets a finite deadline and cannot happen after play begins.
-- Any signed-in player may report an in-progress result. Team winners must be selected explicitly; FFA results require every distinct participant exactly once.
+Never commit, upload, print, or paste those files. The Vite Worker preview can include local `.dev.vars` values, so do not distribute a raw build directory as a handout.
 
-Run the night from Home. Jimmy starts the session, opens a matchup, and starts play. A participant reviews and submits the result. Success appears only after the house accepts it. Phones poll shared state every two seconds, and the server controls deadlines.
+## Game-night rules
 
-Commissioner recovery includes pausing new wagers, opening drafts, voiding unfinished or completed rounds, and correcting a completed result with a reason. Corrections reverse linked game and wager payouts, apply the corrected result, and recompute records/ratings from result history. Previously accepted odds on later rounds remain unchanged. A correction can put a team into debt if it has already spent the reversed winnings; further wagers still require sufficient available funds.
+Each new database starts with four teams at $10,000,000 and opening-grant ledger entries. A clean database starts without demo events.
 
-When a response is missing, the browser saves its original request receipt in session storage and blocks further changes and sign-out. Use **Resolve saved request** to retrieve its saved result, or retry the same ID if the server has no receipt. Refreshing the page retains it; if the session expires, sign in as the original player. A disconnected open page shows its last confirmed state read-only. There is no offline wagering or background queue of new bets. Closing the tab/browser may discard session storage, so resolve uncertain requests before doing so.
+| Game | House purse |
+| --- | ---: |
+| Smash | $1,500,000 |
+| Boomerang Fu | $1,250,000 |
+| Worms | $1,750,000 |
+| Mario Party | $3,000,000 |
+| Mario Kart | $1,500,000 |
+| NFL Blitz | $1,750,000 |
+| Billiards | $1,250,000 |
 
-Before closeout, finish or void every draft, round, and open ticket. **Review closeout** freezes the final banks, rules, results, tickets, and ledger. Export the final archive from the summary. Review/correct mistakes before closing; closed event records are immutable in the normal UI. A commissioner can also fetch `/api/export` while authenticated for a consistent state-plus-database-audit export. The current UI is designed around a single event; starting another night through the domain API archives the previous snapshot and carries its balances, rather than resetting the league.
+Each event stores its purse explicitly. Participant count does not change it. Losing a match does not debit the losing team. Mario Party has results but no betting market.
 
-Existing local data is preserved by the additive migration. It does not invent purse snapshots or payout links for legacy matches. An unfinished legacy round can be voided and recreated. A completed legacy result without complete linked settlement entries cannot be automatically corrected. The pre-upgrade local database backup is in `.wrangler/baseline-before-step12`. Use a new database for a clean rehearsal or the real event; do not reset the old league to achieve that.
+Players sign in with a name and passcode. Jimmy's account has commissioner powers. Ordinary signed-in players can start the night, schedule or create matchups, start play, report results, and run rematches. Commissioner-only actions include corrections, voids and refunds, betting pauses, economy and bank changes, reset, and final closeout.
 
-Verification commands:
+Betting enforces one open team ticket per market, self-bet and teammate restrictions, editable tickets with refund history, balance checks, and deadlines. Opening a market freezes its odds, purse, and stake limits. Reopening requires a finite deadline and is disallowed after play begins.
 
-```sh
-npm test
+Team results require an explicit winner. Free-for-all results require every distinct participant exactly once. Results are reviewed before settlement. Phones poll shared state every two seconds, and the server controls deadlines.
+
+## Reliability and recovery
+
+The Worker is authoritative for every financial and result mutation. The client does not announce success until the Worker confirms the action.
+
+The action path provides authenticated sessions, role checks, allowlisted and validated actions, revision checks, atomic state/audit/receipt writes, duplicate-request recovery, server-side time and deadline enforcement, ledger reconciliation, correction and void paths, frozen closeout, and archive export.
+
+If a response is lost, the browser saves the original request receipt in session storage, blocks additional changes and sign-out, and shows `Resolve saved request`. Resolve it or retry the same request ID before closing the tab. If the session expires, sign in again as the original player. A disconnected page shows the last confirmed state as read-only. There is no offline wagering or background queue of new bets.
+
+Before closeout, finish or void every draft, round, and open ticket. Review and correct errors first. Closeout freezes the final banks, rules, results, tickets, and ledger. Export the final archive from the summary. The authenticated commissioner endpoint `/api/export` provides a consistent state and database-audit export.
+
+The app is designed around one active event. Starting another event through the domain API archives the previous snapshot and carries balances forward instead of resetting the league.
+
+## Verification
+
+Run the focused checks with Node 24:
+
+```powershell
 npm run check
 npm run build
+npx vitest run --config vite.config.ts --exclude browser-tests/**
 ```
 
-Browser smoke testing runs against a fresh isolated local D1 database and Chromium:
+The current `npm test` script also discovers `browser-tests/smoke.spec.ts`, which is a Playwright suite. Use the explicit Vitest command for unit and Worker coverage, and use Playwright for browser coverage:
 
 ```powershell
 npm run test:browser
 ```
 
-To point the same suite at a deployed staging URL, set `BRANDUEL_BASE_URL`; the suite will not start a local server in that mode. Use a staging account and database because the test starts a game night.
+Browser smoke testing creates a fresh isolated local D1 database and requires Chromium. To test staging, set `BRANDUEL_BASE_URL`; the suite will not start a local server in that mode. Use staging credentials because the test starts a game night.
 
-Economy simulation uses the production domain action path and checks the ledger, tickets, frozen purses, wagering payouts, corrections, voids, closeout guard, and final snapshot after every accepted action. It prints an economy-balance report with bankroll distributions, debt rate, wager outcomes by profile, correction and void counts, and the five largest bankroll gaps.
-
-```powershell
-# Fast deterministic run (25 nights x 8 rounds)
-npm run sim:economy:fast
-
-# Longer run (500 nights x 12 rounds)
-npm run sim:economy:stress
-
-# Replay one printed failure or extreme-night seed
-$env:ECONOMY_SEED = 481516
-$env:ECONOMY_NIGHTS = 1
-npm run sim:economy:replay
-```
-
-For the real Worker/D1 rehearsal, use a fresh loopback database. The smoke script requires `BRANDUEL_STATE_PATH` in both terminals and rejects the ordinary development state path. It uses separate authenticated player sessions, duplicate IDs, retry recovery, concurrent ticket edits, settlement, correction, void, reconciliation, export, and closeout.
-
-The 57 automated tests cover domain rules, Worker authentication and SQLite transaction behavior, client transport recovery, the economy simulator, and its settlement regression checks. Worker tests inject failures between state/audit/receipt operations, simulate a lost commit response, and race revisions and duplicate IDs. The full build type-checks both browser and Worker source. `review/probes.mjs` now runs regression coverage instead of asserting that the original defects still exist.
-
-To repeat the real local Worker/D1 smoke test, pick a new unused state directory. With Node 24 selected, run these commands in one terminal:
+The real Worker/D1 rehearsal uses a new loopback state directory. In one terminal:
 
 ```powershell
 $env:BRANDUEL_STATE_PATH = '.wrangler/rehearsal-new'
@@ -84,13 +102,88 @@ npm run db:migrate:local -- --persist-to $env:BRANDUEL_STATE_PATH
 npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
 
-In a second terminal in the project folder:
+In a second terminal:
 
-```sh
+```powershell
 $env:BRANDUEL_STATE_PATH = '.wrangler/rehearsal-new'
 npm run test:event
 ```
 
-The script signs into separate sessions, races team edits, retries accepted requests, settles/corrects/voids rounds, reconciles every bank, and closes the event. It requires an empty loopback database and deliberately leaves its test history in that isolated directory. Choose another unused directory for the next run. Keep `BRANDUEL_STATE_PATH` unset for ordinary development. The Windows startup helper always clears that override and uses the standard local database.
+The event smoke test uses separate authenticated sessions and exercises duplicate request IDs, retry recovery, concurrent ticket edits, settlement, correction, void, reconciliation, export, and closeout. It requires an empty isolated database and leaves its history there. Choose a new directory for each run. Keep `BRANDUEL_STATE_PATH` unset for ordinary development.
 
-Cloudflare deployment is the next phase. `wrangler.jsonc` still contains a placeholder database ID. Before deployment, configure separate staging and production databases, provision `PLAYER_PASSCODES` as a Worker secret in the selected environment, apply migrations there, and build for that environment. No remote deployment was performed in this work. Multi-device rehearsal at the venue remains necessary before event use.
+The economy simulation checks reproducible nights:
+
+```powershell
+npm run sim:economy:fast
+npm run sim:economy:stress
+$env:ECONOMY_SEED = 481516
+$env:ECONOMY_NIGHTS = 1
+npm run sim:economy:replay
+```
+
+## Cloudflare deployment
+
+Environment selection happens during the Vite build. Set `CLOUDFLARE_ENV` before building and deploying. A later deploy flag cannot change bindings selected by an earlier build.
+
+Staging:
+
+```powershell
+$env:CLOUDFLARE_ENV = 'staging'
+npx.cmd wrangler d1 migrations apply branduel-staging --remote --env staging --config wrangler.jsonc
+npm run build
+npx.cmd wrangler deploy --env staging --config wrangler.jsonc
+```
+
+Production:
+
+```powershell
+$env:CLOUDFLARE_ENV = 'production'
+npx.cmd wrangler d1 migrations apply branduel-production --remote --env production --config wrangler.jsonc
+npm run build
+npx.cmd wrangler deploy --env production --config wrangler.jsonc
+```
+
+Provision or rotate the secret interactively. Never put a plaintext passcode file in a shell transcript:
+
+```powershell
+npx.cmd wrangler secret put PLAYER_PASSCODES --env staging --config wrangler.jsonc
+npx.cmd wrangler secret put PLAYER_PASSCODES --env production --config wrangler.jsonc
+```
+
+After deployment, check the hosted root and authenticated `/api/health`. Verify login, clean revision 1 state, zero events, and four $10,000,000 balances before inviting players. Rehearse on actual phones before the real night. On Windows, use `npx.cmd wrangler`.
+
+## Credentials
+
+The current test setup uses lowercase player names as memorable passcodes. This is for staging tests only. Rotate to strong, unique passcodes before the real event. Rotation invalidates existing sessions, so players must refresh or reopen the app and sign in again.
+
+Give each player only their own passcode. Use separate browser profiles or devices for different players because tabs in one browser share its session cookie.
+
+## GitHub workflow
+
+The canonical repository is `https://github.com/jimmybranley-dp/BranDuel`. Keep the working tree clean, make a focused commit, run relevant checks, and push to `main` when code is ready for the shared repository.
+
+Do not commit `.dev.vars`, `.private-player-*.json`, `.wrangler/`, build output, test results, or browser reports. GitHub contains source, tests, migrations, configuration, and documentation. Cloudflare contains hosted code, secrets, and D1 state.
+
+## Project history
+
+The original prototype kept game state in the client and used a test identity picker. The reliability work moved the action boundary into the Worker and added authenticated sessions, role enforcement, atomic writes, request receipts, ledger auditing, result review, corrections, voids, reconciliation, and closeout export.
+
+The hosted rollout added separate staging and production D1 databases, Worker secrets, environment-specific builds, and hosted verification. The live-night flow was then distributed so ordinary players can start and operate normal rounds while Jimmy retains recovery, economy, and closeout controls.
+
+Existing local data is preserved by the additive migration. It does not invent missing purse snapshots or payout links for legacy matches. An unfinished legacy round can be voided and recreated. A completed legacy result without complete linked settlement entries cannot be corrected automatically. Use a new database for a clean rehearsal or the real event. Do not reset the old league to obtain one.
+
+## Important files
+
+| Path | Role |
+| --- | --- |
+| `worker/index.ts` | Worker routes, authentication, actions, receipts, audit, and export |
+| `src/domain.ts` | Rules, permissions, validation, and state transitions |
+| `src/transport.ts` | Request lifecycle and uncertain-request recovery |
+| `src/store.tsx` | Client state and polling |
+| `src/App.tsx` | Game-night screens and controls |
+| `src/settlement.ts` | Settlement, payouts, corrections, and refunds |
+| `migrations/` | Local and remote D1 schema migrations |
+| `wrangler.jsonc` | Worker, asset, D1, secret, and environment configuration |
+| `Start-BranDuel.ps1` | Windows local startup helper |
+| `MONDAY-REVIEW.md` | Earlier event-readiness review and remaining risks |
+| `AGENTS.md` | Instructions for future coding agents |
