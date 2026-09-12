@@ -3,7 +3,12 @@
   "name": "branduel",
   "compatibility_date": "2026-08-15",
   "main": "./worker/index.ts",
+  "workers_dev": true,
+  "secrets": {
+    "required": ["PLAYER_PASSCODES"]
+  },
   "assets": {
+    "directory": "./dist/client",
     "not_found_handling": "single-page-application"
   },
   "d1_databases": [
@@ -13,5 +18,37 @@
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "env": {
+    "staging": {
+      "name": "branduel-staging",
+      "workers_dev": true,
+      "secrets": {
+        "required": ["PLAYER_PASSCODES"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "branduel-staging",
+          "database_id": "fe6ed6e1-87fa-4f0d-a092-78defae795c8",
+          "migrations_dir": "migrations"
+        }
+      ]
+    },
+    "production": {
+      "name": "branduel-production",
+      "workers_dev": true,
+      "secrets": {
+        "required": ["PLAYER_PASSCODES"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "branduel-production",
+          "database_id": "0f145357-054d-40aa-875f-16f270314186",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
 }

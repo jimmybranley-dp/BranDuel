@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState } from "./data";
-import { reducer } from "./store";
+import { reducer } from "./domain";
 
 describe("Game Night session", () => {
   it("runs a live team round from betting through settlement", () => {
@@ -30,7 +30,7 @@ describe("Game Night session", () => {
     state = reducer(state, { type: "SETTLE_TEAM_EVENT", eventId: eventId!, winningTeamId: "corey-jimmy" });
     expect(state.gameNight?.activeEventId).toBeUndefined();
     expect(state.gameNight?.lastSettledEventId).toBe(eventId);
-    expect(state.balances["corey-jimmy"]).toBe(10_545_000);
+    expect(state.balances["corey-jimmy"]).toBe(11_170_000);
   });
 
   it("can run the same matchup again with refreshed odds", () => {

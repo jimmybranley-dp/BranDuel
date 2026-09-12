@@ -1,160 +1,233 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { createInitialState } from "../src/data";
-import { reducer, type Action } from "../src/store";
+import { createInitialState, normalizeState, PLAYER_IDS } from "../src/data";
+import { applyAction, parseAction, DomainError } from "../src/domain";
 import type { AppState, PlayerId } from "../src/types";
 
-interface Env {
-  DB: D1Database;
-}
-
-interface StateRow {
-  revision: number;
-  state_json: string;
-}
-
-interface ActionRequest {
-  action: Action;
-  actorId: PlayerId;
-  requestId: string;
-}
-
-const PLAYER_IDS = new Set<PlayerId>(["jason", "ezra", "corey", "jimmy", "brandon", "andrew", "bruce", "ryan"]);
-const COMMISSIONER_ACTIONS = new Set<Action["type"]>([
-  "START_GAME_NIGHT",
-  "END_GAME_NIGHT",
-  "CREATE_LIVE_EVENT",
-  "START_MATCH",
-  "RUN_IT_BACK",
-  "DISMISS_RECAP",
-  "CANCEL_EVENT",
-  "REOPEN_EVENT",
-  "UPDATE_SETTINGS",
-  "ADJUST_BALANCE",
-  "RESET",
-]);
+export interface Env { DB: D1Database; PLAYER_PASSCODES?: string }
+interface Snapshot { state: AppState; revision: number; serverTime: string; playerId?: PlayerId }
+interface Receipt { actor_id: string; payload_hash: string; response_json: string; response_status: number }
+const COOKIE = "branduel_session";
+const SESSION_SECONDS = 7 * 24 * 60 * 60;
+const MAX_BODY = 32_768;
 
 function json(data: unknown, init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
   headers.set("cache-control", "no-store");
+  headers.set("x-content-type-options", "nosniff");
   return new Response(JSON.stringify(data), { ...init, headers });
 }
-
-async function ensureSchema(db: D1Database) {
-  await db.batch([
-    db.prepare("CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL DEFAULT 1, state_json TEXT NOT NULL, updated_at TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS action_requests (request_id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action_type TEXT NOT NULL, response_json TEXT, created_at TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS ledger_audit (entry_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, amount INTEGER NOT NULL, entry_type TEXT NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL)"),
+function failure(error: string, code: string, status: number) { return json({ error, code }, { status }); }
+function hex(bytes: ArrayBuffer | Uint8Array) { return Array.from(new Uint8Array(bytes)).map(value => value.toString(16).padStart(2, "0")).join(""); }
+async function digest(value: string) { return hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))); }
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return "{" + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",") + "}";
+  return JSON.stringify(value);
+}
+function credentials(env: Env): Record<string, string> {
+  try {
+    const hashes = JSON.parse(env.PLAYER_PASSCODES ?? "null");
+    if (!hashes || typeof hashes !== "object" || PLAYER_IDS.some(id => typeof hashes[id] !== "string" || !/^pbkdf2\$100000\$[a-f0-9]{32}\$[a-f0-9]{64}$/.test(hashes[id]))) throw new Error();
+    return hashes;
+  } catch { throw new Error("Player credentials have not been configured."); }
+}
+async function verify(passcode: string, stored: string) {
+  const [, iterations, salt, expected] = stored.split("$");
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(passcode), "PBKDF2", false, ["deriveBits"]);
+  const actual = hex(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: Uint8Array.from(salt.match(/../g)!, pair => parseInt(pair, 16)), iterations: Number(iterations) }, key, 256));
+  let difference = 0;
+  for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ actual.charCodeAt(i);
+  return difference === 0;
+}
+function tokenFrom(request: Request) { return request.headers.get("cookie")?.split(";").map(part => part.trim()).find(part => part.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1); }
+function cookie(request: Request, token: string, seconds: number) {
+  return `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${new URL(request.url).protocol === "https:" ? "; Secure" : ""}`;
+}
+async function actor(request: Request, env: Env): Promise<PlayerId | null> {
+  const token = tokenFrom(request);
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
+  const row = await env.DB.prepare("SELECT player_id, credential_hash FROM player_sessions WHERE token_hash = ? AND expires_at > ?").bind(await digest(token), Date.now()).first<{ player_id: PlayerId; credential_hash: string }>();
+  if (!row || !PLAYER_IDS.includes(row.player_id) || await digest(credentials(env)[row.player_id]) !== row.credential_hash) return null;
+  return row.player_id;
+}
+async function body(request: Request): Promise<Record<string, unknown>> {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) throw new DomainError("Use application/json.", 400, "INVALID_REQUEST");
+  const reader = request.body?.getReader();
+  if (!reader) throw new DomainError("A JSON body is required.", 400, "INVALID_REQUEST");
+  let size = 0;
+  const parts: Uint8Array[] = [];
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    size += part.value.length;
+    if (size > MAX_BODY) { await reader.cancel(); throw new DomainError("Request body is too large.", 400, "INVALID_REQUEST"); }
+    parts.push(part.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.length; }
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new DomainError("Invalid JSON body.", 400, "INVALID_JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new DomainError("Invalid request body.", 400, "INVALID_REQUEST");
+  return value as Record<string, unknown>;
+}
+function ledgerStatements(db: D1Database, previous: AppState | null, next: AppState, requestId: string, actorId: string) {
+  const previousIds = new Set(previous?.ledger.map(entry => entry.id));
+  return next.ledger.filter(entry => !previousIds.has(entry.id)).flatMap(entry => [
+    db.prepare("INSERT INTO ledger_audit (entry_id, team_id, amount, entry_type, description, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(entry.id, entry.teamId, entry.amount, entry.type, entry.description, entry.createdAt),
+    db.prepare("INSERT INTO ledger_context (entry_id, request_id, actor_id, entry_json) VALUES (?, ?, ?, ?)").bind(entry.id, requestId, actorId, JSON.stringify(entry)),
   ]);
 }
-
-async function getState(db: D1Database): Promise<{ state: AppState; revision: number }> {
-  await ensureSchema(db);
-  let row = await db.prepare("SELECT revision, state_json FROM app_state WHERE id = 1").first<StateRow>();
+async function getState(db: D1Database): Promise<Snapshot> {
+  let row = await db.prepare("SELECT revision, state_json FROM app_state WHERE id = 1").first<{ revision: number; state_json: string }>();
   if (!row) {
     const initial = createInitialState();
-    await db.prepare("INSERT OR IGNORE INTO app_state (id, revision, state_json, updated_at) VALUES (1, 1, ?, ?)")
-      .bind(JSON.stringify(initial), new Date().toISOString()).run();
-    row = await db.prepare("SELECT revision, state_json FROM app_state WHERE id = 1").first<StateRow>();
+    const now = new Date().toISOString();
+    try {
+      await db.batch([
+        db.prepare("INSERT INTO app_state (id, revision, state_json, updated_at) VALUES (1, 1, ?, ?)").bind(JSON.stringify(initial), now),
+        ...ledgerStatements(db, null, initial, "initialization", "system"),
+      ]);
+    } catch (error) {
+      row = await db.prepare("SELECT revision, state_json FROM app_state WHERE id = 1").first<{ revision: number; state_json: string }>();
+      if (!row) throw error;
+    }
+    row ??= await db.prepare("SELECT revision, state_json FROM app_state WHERE id = 1").first<{ revision: number; state_json: string }>();
   }
-  if (!row) throw new Error("Unable to initialize BranDuel state.");
-  return { state: JSON.parse(row.state_json) as AppState, revision: row.revision };
+  if (!row) throw new Error("Unable to initialize state.");
+  return { state: normalizeState(JSON.parse(row.state_json) as AppState), revision: row.revision, serverTime: new Date().toISOString() };
 }
-
-function isActionRequest(value: unknown): value is ActionRequest {
-  if (!value || typeof value !== "object") return false;
-  const body = value as Partial<ActionRequest>;
-  return typeof body.requestId === "string"
-    && body.requestId.length >= 8
-    && typeof body.actorId === "string"
-    && PLAYER_IDS.has(body.actorId as PlayerId)
-    && !!body.action
-    && typeof body.action === "object"
-    && typeof (body.action as Action).type === "string";
+async function receipt(db: D1Database, requestId: string) { return db.prepare("SELECT actor_id, payload_hash, response_json, response_status FROM action_receipts WHERE request_id = ?").bind(requestId).first<Receipt>(); }
+function receiptResponse(saved: Receipt, actorId: string, payloadHash?: string) {
+  if (saved.actor_id !== actorId || (payloadHash !== undefined && saved.payload_hash !== payloadHash)) return failure("This request ID belongs to a different action. Refresh and try again.", "REQUEST_KEY_REUSED", 409);
+  const payload = JSON.parse(saved.response_json);
+  if (saved.response_status === 200) payload.serverTime = new Date().toISOString();
+  return json(payload, { status: saved.response_status });
 }
-
-function applyAsActor(current: AppState, action: Action, actorId: PlayerId) {
-  const actorState = structuredClone(current);
-  actorState.currentPlayerId = actorId;
-  const next = reducer(actorState, action);
-  next.currentPlayerId = "jimmy";
-  return next;
-}
-
-async function recordLedgerEntries(db: D1Database, previous: AppState, next: AppState) {
-  const previousIds = new Set(previous.ledger.map((entry) => entry.id));
-  const additions = next.ledger.filter((entry) => !previousIds.has(entry.id));
-  if (!additions.length) return;
-  await db.batch(additions.map((entry) => db.prepare(
-    "INSERT OR IGNORE INTO ledger_audit (entry_id, team_id, amount, entry_type, description, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).bind(entry.id, entry.teamId, entry.amount, entry.type, entry.description, entry.createdAt)));
-}
-
-async function handleAction(request: Request, env: Env) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return json({ error: "Invalid JSON body." }, { status: 400 });
-  }
-  if (!isActionRequest(body)) return json({ error: "Invalid action request." }, { status: 400 });
-  if (body.action.type === "SET_PLAYER") return json({ error: "Player selection is local to each device." }, { status: 400 });
-  if (COMMISSIONER_ACTIONS.has(body.action.type) && body.actorId !== "jimmy") {
-    return json({ error: "Only Jimmy can perform that action." }, { status: 403 });
-  }
-
-  await ensureSchema(env.DB);
-  const reserved = await env.DB.prepare(
-    "INSERT OR IGNORE INTO action_requests (request_id, actor_id, action_type, response_json, created_at) VALUES (?, ?, ?, NULL, ?)",
-  ).bind(body.requestId, body.actorId, body.action.type, new Date().toISOString()).run();
-
-  if ((reserved.meta.changes ?? 0) === 0) {
-    const existing = await env.DB.prepare("SELECT response_json FROM action_requests WHERE request_id = ?")
-      .bind(body.requestId).first<{ response_json: string | null }>();
-    if (existing?.response_json) return json(JSON.parse(existing.response_json));
-    return json({ error: "This action is already being processed." }, { status: 409 });
-  }
-
-  try {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const current = await getState(env.DB);
-      const next = applyAsActor(current.state, body.action, body.actorId);
-      const nextRevision = current.revision + 1;
-      const payload = { state: next, revision: nextRevision, serverTime: new Date().toISOString() };
-      const updated = await env.DB.prepare(
-        "UPDATE app_state SET state_json = ?, revision = ?, updated_at = ? WHERE id = 1 AND revision = ?",
-      ).bind(JSON.stringify(next), nextRevision, payload.serverTime, current.revision).run();
-
-      if ((updated.meta.changes ?? 0) === 1) {
-        await recordLedgerEntries(env.DB, current.state, next);
-        await env.DB.prepare("UPDATE action_requests SET response_json = ? WHERE request_id = ?")
-          .bind(JSON.stringify(payload), body.requestId).run();
-        return json(payload);
+async function handleAction(request: Request, env: Env, actorId: PlayerId) {
+  const data = await body(request);
+  if (typeof data.requestId !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(data.requestId) || typeof data.expectedPlayerId !== "string" || !PLAYER_IDS.includes(data.expectedPlayerId as PlayerId) || Object.keys(data).some(key => !["requestId", "action", "expectedPlayerId"].includes(key))) return failure("Invalid action request.", "INVALID_REQUEST", 400);
+  // Cookies are shared between tabs. A stale tab must never submit under another player's new session.
+  if (data.expectedPlayerId !== actorId) return failure(`This browser is signed in as another player. Sign in as ${data.expectedPlayerId} to resolve this request.`, "SESSION_CHANGED", 401);
+  const requestId = data.requestId;
+  const payloadHash = await digest(canonical(data.action));
+  let saved = await receipt(env.DB, requestId);
+  if (saved) return receiptResponse(saved, actorId, payloadHash);
+  const legacy = await env.DB.prepare("SELECT request_id FROM action_requests WHERE request_id = ?").bind(requestId).first();
+  if (legacy) return failure("This request predates verified receipts. Jimmy must reconcile its original change before submitting a new request.", "LEGACY_REQUEST", 409);
+  const action = parseAction(data.action);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const current = await getState(env.DB);
+    let next: AppState;
+    try { next = applyAction(current.state, action, actorId); }
+    catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+      // Persist a terminal rejection at its observed revision so retries cannot become a new wager later.
+      try {
+        await env.DB.batch([
+          env.DB.prepare("UPDATE app_state SET revision = revision WHERE id = 1 AND revision = ?").bind(current.revision),
+          env.DB.prepare("INSERT INTO write_guards (request_id, valid) VALUES (?, changes())").bind(requestId),
+          env.DB.prepare("INSERT INTO action_receipts (request_id, actor_id, payload_hash, response_json, response_status, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(requestId, actorId, payloadHash, JSON.stringify({ error: error.message, code: error.code }), error.status, new Date().toISOString()),
+          env.DB.prepare("DELETE FROM write_guards WHERE request_id = ?").bind(requestId),
+        ]);
+        return failure(error.message, error.code, error.status);
+      } catch (writeError) {
+        saved = await receipt(env.DB, requestId);
+        if (saved) return receiptResponse(saved, actorId, payloadHash);
+        const latest = await getState(env.DB);
+        if (latest.revision !== current.revision) continue;
+        throw writeError;
       }
     }
-    throw new Error("The league state changed too many times. Try again.");
-  } catch (error) {
-    await env.DB.prepare("DELETE FROM action_requests WHERE request_id = ?").bind(body.requestId).run();
-    const message = error instanceof Error ? error.message : "Unable to apply action.";
-    return json({ error: message }, { status: 409 });
+    const payload: Snapshot = { state: next, revision: current.revision + 1, serverTime: new Date().toISOString(), playerId: actorId };
+    try {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE app_state SET state_json = ?, revision = ?, updated_at = ? WHERE id = 1 AND revision = ?").bind(JSON.stringify(next), payload.revision, payload.serverTime, current.revision),
+        // D1 batch runs sequentially in one transaction. CHECK forces rollback if the CAS changed zero rows.
+        env.DB.prepare("INSERT INTO write_guards (request_id, valid) VALUES (?, changes())").bind(requestId),
+        ...ledgerStatements(env.DB, current.state, next, requestId, actorId),
+        env.DB.prepare("INSERT INTO action_receipts (request_id, actor_id, payload_hash, response_json, response_status, created_at) VALUES (?, ?, ?, ?, 200, ?)").bind(requestId, actorId, payloadHash, JSON.stringify(payload), payload.serverTime),
+        env.DB.prepare("DELETE FROM write_guards WHERE request_id = ?").bind(requestId),
+      ]);
+      return json(payload);
+    } catch (error) {
+      // A lost response after commit is resolved by its durable receipt, never by deleting the request.
+      saved = await receipt(env.DB, requestId);
+      if (saved) return receiptResponse(saved, actorId, payloadHash);
+      const latest = await getState(env.DB);
+      if (latest.revision !== current.revision) continue;
+      throw error;
+    }
   }
+  return failure("The house is busy. Retry this same request shortly.", "WRITE_CONFLICT", 503);
+}
+async function login(request: Request, env: Env) {
+  const data = await body(request);
+  if (typeof data.playerId !== "string" || !PLAYER_IDS.includes(data.playerId as PlayerId) || typeof data.passcode !== "string" || data.passcode.length < 1 || data.passcode.length > 128) return failure("Choose a player and enter their passcode.", "INVALID_LOGIN", 400);
+  const now = Date.now();
+  const window = Math.floor(now / 900_000);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const keys = [`player:${data.playerId}:${window}`, `ip:${await digest(ip)}:${window}`];
+  const counts = await env.DB.batch(keys.map(key => env.DB.prepare("INSERT INTO login_attempts (bucket, attempts, expires_at) VALUES (?, 1, ?) ON CONFLICT(bucket) DO UPDATE SET attempts = attempts + 1 RETURNING attempts").bind(key, now + 900_000)));
+  const attempts = counts.map(result => Number((result.results[0] as { attempts: number }).attempts));
+  if (attempts[0] > 20 || attempts[1] > 100) return failure("Too many sign-in attempts. Wait 15 minutes and try again.", "LOGIN_THROTTLED", 429);
+  const hashes = credentials(env);
+  if (!await verify(data.passcode, hashes[data.playerId])) return failure("That player and passcode do not match.", "INVALID_LOGIN", 401);
+  const token = hex(crypto.getRandomValues(new Uint8Array(32)));
+  const oldToken = tokenFrom(request);
+  const statements = [env.DB.prepare("INSERT INTO player_sessions (token_hash, player_id, credential_hash, expires_at) VALUES (?, ?, ?, ?)").bind(await digest(token), data.playerId, await digest(hashes[data.playerId]), now + SESSION_SECONDS * 1000)];
+  if (oldToken) statements.push(env.DB.prepare("DELETE FROM player_sessions WHERE token_hash = ?").bind(await digest(oldToken)));
+  statements.push(env.DB.prepare("DELETE FROM player_sessions WHERE expires_at <= ?").bind(now), env.DB.prepare("DELETE FROM login_attempts WHERE expires_at <= ?").bind(now));
+  await env.DB.batch(statements);
+  return json({ playerId: data.playerId }, { headers: { "set-cookie": cookie(request, token, SESSION_SECONDS) } });
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/api/health") {
-      return json({ ok: true, service: "BranDuel house" });
+    if (!url.pathname.startsWith("/api/")) return new Response(null, { status: 404 });
+    try {
+      if (request.method !== "GET" && (request.headers.get("origin") !== url.origin || request.headers.get("sec-fetch-site") === "cross-site")) return failure("Use this app’s own page to make changes.", "ORIGIN_REJECTED", 403);
+      if (url.pathname === "/api/health" && request.method === "GET") {
+        await env.DB.prepare("SELECT COUNT(*) AS count FROM app_state").first();
+        return json({ ok: true, service: "BranDuel house" });
+      }
+      if (url.pathname === "/api/login" && request.method === "POST") return await login(request, env);
+      if (url.pathname === "/api/logout" && request.method === "POST") {
+        const token = tokenFrom(request);
+        if (token) await env.DB.prepare("DELETE FROM player_sessions WHERE token_hash = ?").bind(await digest(token)).run();
+        return json({ playerId: null }, { headers: { "set-cookie": cookie(request, "", 0) } });
+      }
+      const playerId = await actor(request, env);
+      if (url.pathname === "/api/session" && request.method === "GET") return json({ playerId });
+      if (!playerId) return failure("Sign in to continue.", "AUTH_REQUIRED", 401);
+      if (url.pathname === "/api/state" && request.method === "GET") return json({ ...await getState(env.DB), playerId });
+      if (url.pathname === "/api/actions" && request.method === "POST") return await handleAction(request, env, playerId);
+      if (url.pathname.startsWith("/api/actions/") && request.method === "GET") {
+        const expectedPlayerId = url.searchParams.get("expectedPlayerId");
+        if (expectedPlayerId !== null && expectedPlayerId !== playerId) return failure("This browser is signed in as another player. Sign in as the player who submitted this request to resolve it.", "SESSION_CHANGED", 401);
+        const saved = await receipt(env.DB, url.pathname.slice("/api/actions/".length));
+        if (!saved || saved.actor_id !== playerId) return failure("No accepted request with this ID was found.", "REQUEST_UNKNOWN", 404);
+        return receiptResponse(saved, playerId);
+      }
+      if (url.pathname === "/api/export" && request.method === "GET") {
+        if (playerId !== "jimmy") return failure("Only Jimmy can export the event.", "FORBIDDEN", 403);
+        await getState(env.DB);
+        const [stateRows, audit] = await env.DB.batch([
+          env.DB.prepare("SELECT revision, state_json FROM app_state WHERE id = 1"),
+          env.DB.prepare("SELECT ledger_audit.*, ledger_context.request_id, ledger_context.actor_id, ledger_context.entry_json FROM ledger_audit LEFT JOIN ledger_context USING(entry_id) ORDER BY created_at, entry_id"),
+        ]);
+        const row = stateRows.results[0] as unknown as { revision: number; state_json: string };
+        const now = new Date().toISOString();
+        return json({ state: JSON.parse(row.state_json), revision: row.revision, serverTime: now, exportedAt: now, ledgerAudit: audit.results }, { headers: { "content-disposition": `attachment; filename="branduel-${now.slice(0, 10)}.json"` } });
+      }
+      return failure("API route not found.", "NOT_FOUND", 404);
+    } catch (error) {
+      if (error instanceof DomainError) return failure(error.message, error.code, error.status);
+      console.error("BranDuel API error", error instanceof Error ? error.message : "Unknown failure");
+      return failure("The house could not confirm this request. Keep it pending and retry shortly.", "SERVICE_UNAVAILABLE", 503);
     }
-    if (url.pathname === "/api/state" && request.method === "GET") {
-      const current = await getState(env.DB);
-      return json({ ...current, serverTime: new Date().toISOString() });
-    }
-    if (url.pathname === "/api/actions" && request.method === "POST") {
-      return handleAction(request, env);
-    }
-    if (url.pathname.startsWith("/api/")) return json({ error: "API route not found." }, { status: 404 });
-    return new Response(null, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;

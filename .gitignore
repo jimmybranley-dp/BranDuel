@@ -4,3 +4,10 @@ dist/
 *.tsbuildinfo
 *.log
 .DS_Store
+.dev.vars*
+.env*
+*.private.json
+*.private.txt
+.private-player-*.json
+test-results/
+playwright-report/

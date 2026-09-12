@@ -1,405 +1,140 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { createInitialState } from "./data";
-import { canPlayerBet, generateOdds, getFreeForAllShares, isBettingOpen, selectionWon } from "./engine";
-import type { AppSettings, AppState, EventFormat, GameId, PlayerId, ScheduledEvent, TeamId } from "./types";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createInitialState, normalizeState } from "./data";
+import type { Action } from "./domain";
+import type { AppState, PlayerId } from "./types";
+import { postAction, resolveRequest, type PendingRequest, type ServerSnapshot } from "./transport";
 
-const STORAGE_KEY = "branduel-state-v2";
-const PLAYER_STORAGE_KEY = "branduel-player-v1";
-
-type SchedulePayload = {
-  gameId: GameId;
-  format: EventFormat;
-  scheduledAt: string;
-  teamIds?: [TeamId, TeamId];
-  playerIds?: PlayerId[];
+const CACHE_KEY = "branduel-confirmed-state-v3";
+const PENDING_KEY = "branduel-pending-request-v1";
+export type SyncStatus = "connecting" | "shared" | "offline";
+type StoreValue = {
+  state: AppState; dispatch: (action: Action) => Promise<boolean>; syncStatus: SyncStatus;
+  playerId: PlayerId | null; sessionReady: boolean; busy: boolean; pending: PendingRequest | null;
+  error: string; lastSync: number | null; serverOffset: number; canWrite: boolean;
+  login: (playerId: PlayerId, passcode: string) => Promise<boolean>; logout: () => Promise<void>;
+  retryPending: () => Promise<void>; refresh: () => Promise<void>;
 };
-
-export type Action =
-  | { type: "SET_PLAYER"; playerId: PlayerId }
-  | { type: "START_GAME_NIGHT" }
-  | { type: "END_GAME_NIGHT" }
-  | { type: "CREATE_LIVE_EVENT"; payload: Omit<SchedulePayload, "scheduledAt"> & { bettingSeconds: number } }
-  | { type: "START_MATCH"; eventId: string }
-  | { type: "RUN_IT_BACK"; eventId: string; bettingSeconds: number }
-  | { type: "DISMISS_RECAP" }
-  | { type: "SCHEDULE_EVENT"; payload: SchedulePayload }
-  | { type: "PLACE_BET"; eventId: string; selectionId: string; stake: number }
-  | { type: "SETTLE_TEAM_EVENT"; eventId: string; winningTeamId: TeamId }
-  | { type: "SETTLE_FFA_EVENT"; eventId: string; orderedPlayerIds: PlayerId[] }
-  | { type: "CANCEL_EVENT"; eventId: string }
-  | { type: "REOPEN_EVENT"; eventId: string }
-  | { type: "UPDATE_SETTINGS"; settings: AppSettings }
-  | { type: "ADJUST_BALANCE"; teamId: TeamId; amount: number; note: string }
-  | { type: "RESET" };
-
-type InternalAction = Action | { type: "HYDRATE_REMOTE"; state: AppState };
-export type SyncStatus = "connecting" | "shared" | "local";
-type StoreValue = { state: AppState; dispatch: React.Dispatch<Action>; syncStatus: SyncStatus };
 const StoreContext = createContext<StoreValue | null>(null);
-
-function id(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+function readSaved<T>(key: string, storage: Storage): T | null {
+  try { return JSON.parse(storage.getItem(key) ?? "null") as T | null; } catch { return null; }
 }
-
-function loadInitialState() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    const playerId = localStorage.getItem(PLAYER_STORAGE_KEY) as PlayerId | null;
-    if (saved) {
-      const state = JSON.parse(saved) as AppState;
-      if (playerId && state.players[playerId]) state.currentPlayerId = playerId;
-      return state;
-    }
-  } catch {
-    // A fresh seed is safer than blocking the app on corrupt local test data.
-  }
-  return createInitialState();
-}
-
-function addLedger(
-  state: AppState,
-  teamId: TeamId,
-  amount: number,
-  type: AppState["ledger"][number]["type"],
-  description: string,
-) {
-  state.ledger.unshift({ id: id("txn"), teamId, amount, type, description, createdAt: new Date().toISOString() });
-}
-
-function settleBets(state: AppState, event: ScheduledEvent) {
-  state.bets = state.bets.map((bet) => {
-    if (bet.eventId !== event.id || bet.status !== "open") return bet;
-    if (selectionWon(event, bet.selectionId)) {
-      const payout = Math.round(bet.stake * bet.decimalOdds);
-      state.balances[bet.teamId] += payout;
-      addLedger(state, bet.teamId, payout, "bet-win", `Winning wager on ${state.games[event.gameId].shortName}`);
-      return { ...bet, status: "won" as const, payout };
-    }
-    return { ...bet, status: "lost" as const, payout: 0 };
-  });
-}
-
-export function reducer(current: AppState, action: InternalAction): AppState {
-  if (action.type === "HYDRATE_REMOTE") {
-    return { ...action.state, currentPlayerId: current.currentPlayerId };
-  }
-  if (action.type === "RESET") return createInitialState();
-  const state = structuredClone(current);
-
-  if (action.type === "SET_PLAYER") {
-    state.currentPlayerId = action.playerId;
-    return state;
-  }
-
-  if (action.type === "START_GAME_NIGHT") {
-    if (state.gameNight?.status === "active") return current;
-    state.gameNight = {
-      id: id("night"),
-      status: "active",
-      startedAt: new Date().toISOString(),
-      eventIds: [],
-    };
-    return state;
-  }
-
-  if (action.type === "END_GAME_NIGHT") {
-    if (!state.gameNight || state.gameNight.status !== "active" || state.gameNight.activeEventId) return current;
-    state.gameNight.status = "ended";
-    state.gameNight.endedAt = new Date().toISOString();
-    return state;
-  }
-
-  if (action.type === "CREATE_LIVE_EVENT") {
-    if (!state.gameNight || state.gameNight.status !== "active" || state.gameNight.activeEventId) return current;
-    const now = new Date();
-    const participants = action.payload.format === "teams" ? action.payload.teamIds ?? [] : action.payload.playerIds ?? [];
-    const event: ScheduledEvent = {
-      id: id("evt"),
-      gameId: action.payload.gameId,
-      format: action.payload.format,
-      teamIds: action.payload.teamIds,
-      playerIds: action.payload.playerIds,
-      scheduledAt: now.toISOString(),
-      bettingClosesAt: new Date(now.getTime() + action.payload.bettingSeconds * 1000).toISOString(),
-      gameNightId: state.gameNight.id,
-      status: "betting",
-      odds: generateOdds(state, action.payload.gameId, action.payload.format, participants),
-      createdBy: state.currentPlayerId,
-      createdAt: now.toISOString(),
-    };
-    state.events.unshift(event);
-    state.gameNight.eventIds.push(event.id);
-    state.gameNight.activeEventId = event.id;
-    state.gameNight.lastSettledEventId = undefined;
-    return state;
-  }
-
-  if (action.type === "START_MATCH") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || event.status !== "betting") return current;
-    event.status = "in-progress";
-    event.bettingReopened = false;
-    return state;
-  }
-
-  if (action.type === "RUN_IT_BACK") {
-    if (!state.gameNight || state.gameNight.status !== "active" || state.gameNight.activeEventId) return current;
-    const previous = state.events.find((item) => item.id === action.eventId);
-    if (!previous || previous.status !== "completed") return current;
-    const now = new Date();
-    const participants = previous.format === "teams" ? previous.teamIds ?? [] : previous.playerIds ?? [];
-    const event: ScheduledEvent = {
-      id: id("evt"),
-      gameId: previous.gameId,
-      format: previous.format,
-      teamIds: previous.teamIds,
-      playerIds: previous.playerIds,
-      scheduledAt: now.toISOString(),
-      bettingClosesAt: new Date(now.getTime() + action.bettingSeconds * 1000).toISOString(),
-      gameNightId: state.gameNight.id,
-      status: "betting",
-      odds: generateOdds(state, previous.gameId, previous.format, participants),
-      createdBy: state.currentPlayerId,
-      createdAt: now.toISOString(),
-    };
-    state.events.unshift(event);
-    state.gameNight.eventIds.push(event.id);
-    state.gameNight.activeEventId = event.id;
-    state.gameNight.lastSettledEventId = undefined;
-    return state;
-  }
-
-  if (action.type === "DISMISS_RECAP") {
-    if (state.gameNight) state.gameNight.lastSettledEventId = undefined;
-    return state;
-  }
-
-  if (action.type === "SCHEDULE_EVENT") {
-    const participants = action.payload.format === "teams" ? action.payload.teamIds ?? [] : action.payload.playerIds ?? [];
-    const event: ScheduledEvent = {
-      id: id("evt"),
-      ...action.payload,
-      status: "scheduled",
-      odds: generateOdds(state, action.payload.gameId, action.payload.format, participants),
-      createdBy: state.currentPlayerId,
-      createdAt: new Date().toISOString(),
-    };
-    state.events.unshift(event);
-    return state;
-  }
-
-  if (action.type === "PLACE_BET") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || !isBettingOpen(event) || !state.games[event.gameId].bettable) return current;
-    if (!canPlayerBet(state, event, action.selectionId, state.currentPlayerId)) return current;
-    if (action.stake < state.settings.minimumBet || action.stake > state.settings.maximumBet) return current;
-    const teamId = state.players[state.currentPlayerId].teamId;
-    const existing = state.bets.find((bet) => bet.eventId === event.id && bet.teamId === teamId && bet.status === "open");
-    const availableWithExisting = state.balances[teamId] + (existing?.stake ?? 0);
-    if (availableWithExisting < action.stake) return current;
-    const decimalOdds = event.odds[action.selectionId];
-    if (!decimalOdds) return current;
-
-    if (existing) {
-      const difference = existing.stake - action.stake;
-      state.balances[teamId] += difference;
-      existing.selectionId = action.selectionId;
-      existing.stake = action.stake;
-      existing.decimalOdds = decimalOdds;
-      existing.placedBy = state.currentPlayerId;
-      existing.placedAt = new Date().toISOString();
-      if (difference !== 0) {
-        addLedger(
-          state,
-          teamId,
-          difference,
-          difference > 0 ? "bet-refund" : "bet-stake",
-          `Updated team wager on ${state.games[event.gameId].shortName}`,
-        );
-      }
-      return state;
-    }
-
-    state.balances[teamId] -= action.stake;
-    state.bets.unshift({
-      id: id("bet"),
-      eventId: event.id,
-      teamId,
-      placedBy: state.currentPlayerId,
-      selectionId: action.selectionId,
-      stake: action.stake,
-      decimalOdds,
-      status: "open",
-      payout: 0,
-      placedAt: new Date().toISOString(),
-    });
-    addLedger(state, teamId, -action.stake, "bet-stake", `Wager on ${state.games[event.gameId].shortName}`);
-    return state;
-  }
-
-  if (action.type === "SETTLE_TEAM_EVENT") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || !["scheduled", "betting", "in-progress"].includes(event.status) || !event.teamIds?.includes(action.winningTeamId)) return current;
-    event.status = "completed";
-    event.result = { winningTeamId: action.winningTeamId };
-    const payout = state.settings.payouts[event.gameId];
-    state.balances[action.winningTeamId] += payout;
-    addLedger(state, action.winningTeamId, payout, "game-payout", `${state.games[event.gameId].name} win`);
-    settleBets(state, event);
-    if (state.gameNight?.activeEventId === event.id) {
-      state.gameNight.activeEventId = undefined;
-      state.gameNight.lastSettledEventId = event.id;
-    }
-    return state;
-  }
-
-  if (action.type === "SETTLE_FFA_EVENT") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || !["scheduled", "betting", "in-progress"].includes(event.status) || !event.playerIds) return current;
-    const validOrder = action.orderedPlayerIds.length === event.playerIds.length
-      && action.orderedPlayerIds.every((playerId) => event.playerIds?.includes(playerId));
-    if (!validOrder) return current;
-    event.status = "completed";
-    event.result = { orderedPlayerIds: action.orderedPlayerIds };
-    const pot = state.settings.payouts[event.gameId];
-    const shares = getFreeForAllShares(action.orderedPlayerIds.length);
-    action.orderedPlayerIds.forEach((playerId, index) => {
-      const teamId = state.players[playerId].teamId;
-      const payout = Math.round(pot * shares[index]);
-      state.balances[teamId] += payout;
-      addLedger(state, teamId, payout, "game-payout", `${state.games[event.gameId].name}, ${index + 1}${index === 0 ? "st" : index === 1 ? "nd" : index === 2 ? "rd" : "th"} place`);
-    });
-    settleBets(state, event);
-    if (state.gameNight?.activeEventId === event.id) {
-      state.gameNight.activeEventId = undefined;
-      state.gameNight.lastSettledEventId = event.id;
-    }
-    return state;
-  }
-
-  if (action.type === "CANCEL_EVENT") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || !["scheduled", "betting", "in-progress"].includes(event.status)) return current;
-    event.status = "cancelled";
-    state.bets = state.bets.map((bet) => {
-      if (bet.eventId !== event.id || bet.status !== "open") return bet;
-      state.balances[bet.teamId] += bet.stake;
-      addLedger(state, bet.teamId, bet.stake, "bet-refund", `Refund for cancelled ${state.games[event.gameId].shortName} event`);
-      return { ...bet, status: "refunded" as const, payout: bet.stake };
-    });
-    if (state.gameNight?.activeEventId === event.id) {
-      state.gameNight.activeEventId = undefined;
-      state.gameNight.lastSettledEventId = undefined;
-    }
-    return state;
-  }
-
-  if (action.type === "REOPEN_EVENT") {
-    const event = state.events.find((item) => item.id === action.eventId);
-    if (!event || !["scheduled", "betting"].includes(event.status)) return current;
-    event.status = event.gameNightId ? "betting" : "scheduled";
-    event.bettingReopened = true;
-    event.scheduledAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    return state;
-  }
-
-  if (action.type === "UPDATE_SETTINGS") {
-    state.settings = action.settings;
-    Object.values(state.games).forEach((game) => {
-      game.payout = action.settings.payouts[game.id];
-    });
-    return state;
-  }
-
-  if (action.type === "ADJUST_BALANCE") {
-    state.balances[action.teamId] += action.amount;
-    addLedger(state, action.teamId, action.amount, "admin-adjustment", action.note || "Admin adjustment");
-    return state;
-  }
-
-  return current;
-}
-
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [state, localDispatch] = useReducer(reducer, undefined, loadInitialState);
+  const [state, setState] = useState<AppState>(() => normalizeState(readSaved<AppState>(CACHE_KEY, localStorage) ?? createInitialState()));
+  const [playerId, setPlayerId] = useState<PlayerId | null>(null);
+  const playerRef = useRef<PlayerId | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("connecting");
-  const stateRef = useRef(state);
-  const syncStatusRef = useRef<SyncStatus>("connecting");
-  const serverRevision = useRef(0);
-  const actionQueue = useRef<Promise<void>>(Promise.resolve());
-
-  useEffect(() => {
-    stateRef.current = state;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    localStorage.setItem(PLAYER_STORAGE_KEY, state.currentPlayerId);
-  }, [state]);
-
-  const updateSyncStatus = useCallback((status: SyncStatus) => {
-    syncStatusRef.current = status;
-    setSyncStatus(status);
-  }, []);
-
-  const hydrate = useCallback((remoteState: AppState, revision: number) => {
-    if (revision < serverRevision.current) return;
-    serverRevision.current = revision;
-    localDispatch({ type: "HYDRATE_REMOTE", state: remoteState });
-    updateSyncStatus("shared");
-  }, [updateSyncStatus]);
-
-  const fetchRemoteState = useCallback(async () => {
-    try {
-      const response = await fetch("/api/state", { headers: { accept: "application/json" } });
-      if (!response.ok) throw new Error(`State request failed with ${response.status}.`);
-      const payload = await response.json() as { state: AppState; revision: number };
-      if (payload.revision > serverRevision.current || syncStatusRef.current === "local") hydrate(payload.state, payload.revision);
-      else updateSyncStatus("shared");
-    } catch {
-      updateSyncStatus("local");
+  const syncRef = useRef<SyncStatus>("connecting");
+  const [pending, setPending] = useState<PendingRequest | null>(() => readSaved<PendingRequest>(PENDING_KEY, sessionStorage));
+  const pendingRef = useRef(pending);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [error, setError] = useState("");
+  const [connectionError, setConnectionError] = useState("");
+  const [lastSync, setLastSync] = useState<number | null>(null);
+  const [serverOffset, setServerOffset] = useState(0);
+  const revision = useRef(-1);
+  const status = useCallback((value: SyncStatus) => { syncRef.current = value; setSyncStatus(value); }, []);
+  const identity = useCallback((value: PlayerId | null) => { playerRef.current = value; setPlayerId(value); }, []);
+  const hydrate = useCallback((payload: ServerSnapshot) => {
+    if (!playerRef.current) return;
+    if (payload.playerId !== playerRef.current) {
+      identity(null); status("offline"); setError("This browser signed in as another player. Sign in again before making changes."); return;
     }
-  }, [hydrate, updateSyncStatus]);
-
+    if (payload.revision >= revision.current && playerRef.current) {
+      revision.current = payload.revision;
+      const accepted = { ...normalizeState(payload.state), currentPlayerId: playerRef.current };
+      setState(accepted);
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(accepted)); } catch { /* Cache is optional. */ }
+    }
+    const serverTime = typeof payload.serverTime === "number" ? payload.serverTime : Date.parse(payload.serverTime);
+    if (Number.isFinite(serverTime)) setServerOffset(serverTime - Date.now());
+    setConnectionError(""); setLastSync(Date.now()); status("shared");
+  }, [identity, status]);
+  const refresh = useCallback(async () => {
+    if (!playerRef.current) return;
+    try {
+      const response = await fetch("/api/state", { cache: "no-store", signal: AbortSignal.timeout(12000) });
+      if (response.status === 401) { identity(null); throw new Error("Your session expired. Sign in again to continue."); }
+      if (!response.ok) throw new Error("The shared house is unavailable. The last confirmed view is read-only.");
+      hydrate(await response.json() as ServerSnapshot);
+    } catch (cause) { status("offline"); setConnectionError(cause instanceof TypeError || (cause instanceof DOMException && cause.name === "TimeoutError") ? "The shared house is unavailable. Your last confirmed view is read-only until it reconnects." : cause instanceof Error ? cause.message : "Could not refresh the shared house."); }
+  }, [hydrate, identity, status]);
   useEffect(() => {
-    void fetchRemoteState();
-    const interval = window.setInterval(() => void fetchRemoteState(), 2_000);
-    const refresh = () => void fetchRemoteState();
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-      document.removeEventListener("visibilitychange", refresh);
-    };
-  }, [fetchRemoteState]);
-
-  const dispatch = useCallback<React.Dispatch<Action>>((action) => {
-    localDispatch(action);
-    if (action.type === "SET_PLAYER") return;
-
-    const actorId = stateRef.current.currentPlayerId;
-    const requestId = crypto.randomUUID();
-    actionQueue.current = actionQueue.current.then(async () => {
+    let active = true;
+    void (async () => {
       try {
-        const response = await fetch("/api/actions", {
-          method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify({ action, actorId, requestId }),
-        });
-        const payload = await response.json() as { state?: AppState; revision?: number; error?: string };
-        if (!response.ok || !payload.state || typeof payload.revision !== "number") {
-          throw new Error(payload.error ?? `Action request failed with ${response.status}.`);
+        const response = await fetch("/api/session", { cache: "no-store", signal: AbortSignal.timeout(12000) });
+        if (!response.ok) throw new Error("Could not check your session. Try signing in.");
+        const session = await response.json() as { playerId: PlayerId | null };
+        if (!active) return;
+        if (pendingRef.current && session.playerId !== pendingRef.current.playerId) {
+          identity(null); setError(`Sign in as ${pendingRef.current.playerId} to resolve the saved request.`); return;
         }
-        hydrate(payload.state, payload.revision);
-      } catch {
-        updateSyncStatus("local");
-        await fetchRemoteState();
-      }
-    });
-  }, [fetchRemoteState, hydrate, updateSyncStatus]);
-
-  const value = useMemo(() => ({ state, dispatch, syncStatus }), [state, dispatch, syncStatus]);
+        identity(session.playerId);
+        if (session.playerId) await refresh();
+      } catch (cause) { if (active) { status("offline"); setError(cause instanceof Error ? cause.message : "Connection unavailable."); } }
+      finally { if (active) setSessionReady(true); }
+    })();
+    const interval = window.setInterval(() => { if (active) void refresh(); }, 2000);
+    const focus = () => void refresh();
+    window.addEventListener("focus", focus);
+    return () => { active = false; window.clearInterval(interval); window.removeEventListener("focus", focus); };
+  }, [identity, refresh, status]);
+  const clearPending = useCallback(() => {
+    sessionStorage.removeItem(PENDING_KEY); pendingRef.current = null; setPending(null);
+  }, []);
+  const send = useCallback(async (request: PendingRequest, recover = false): Promise<boolean> => {
+    busyRef.current = true; setBusy(true); setError("");
+    try {
+      const result = await (recover ? resolveRequest(request) : postAction(request));
+      if (result.kind === "accepted") { hydrate(result.payload); clearPending(); if (recover) await refresh(); return true; }
+      if (result.kind === "rejected") { clearPending(); setError(result.message); await refresh(); return false; }
+      if (result.unauthorized) identity(null);
+      status("offline"); setError(result.message); return false;
+    } finally { busyRef.current = false; setBusy(false); }
+  }, [clearPending, hydrate, identity, refresh, status]);
+  const dispatch = useCallback(async (action: Action) => {
+    if (busyRef.current || pendingRef.current || !playerRef.current || syncRef.current !== "shared") {
+      setError("Wait for the current request to be resolved and the shared house to reconnect."); return false;
+    }
+    const request: PendingRequest = { requestId: crypto.randomUUID(), playerId: playerRef.current, action, createdAt: new Date().toISOString() };
+    try { sessionStorage.setItem(PENDING_KEY, JSON.stringify(request)); }
+    catch { setError("This browser cannot save a recovery receipt. Enable browser storage before making changes."); return false; }
+    pendingRef.current = request; setPending(request);
+    return send(request);
+  }, [send]);
+  const retryPending = useCallback(async () => {
+    const request = pendingRef.current;
+    if (!request || busyRef.current) return;
+    if (playerRef.current !== request.playerId) { setError(`Sign in as ${request.playerId} to resolve this request.`); return; }
+    await send(request, true);
+  }, [send]);
+  const login = useCallback(async (id: PlayerId, passcode: string) => {
+    if (busyRef.current) return false;
+    if (pendingRef.current && pendingRef.current.playerId !== id) { setError(`Resolve the pending request as ${pendingRef.current.playerId} first.`); return false; }
+    busyRef.current = true; setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ playerId: id, passcode }), signal: AbortSignal.timeout(12000) });
+      const payload = await response.json() as { playerId?: PlayerId; error?: string };
+      if (!response.ok || !payload.playerId) throw new Error(payload.error ?? "Sign-in failed.");
+      identity(payload.playerId); revision.current = -1; await refresh(); return true;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not sign in. Check the connection and try again."); return false; }
+    finally { busyRef.current = false; setBusy(false); }
+  }, [identity, refresh]);
+  const logout = useCallback(async () => {
+    if (busyRef.current || pendingRef.current) { setError("Resolve the pending request before signing out."); return; }
+    busyRef.current = true; setBusy(true);
+    try {
+      const response = await fetch("/api/logout", { method: "POST", signal: AbortSignal.timeout(12000) });
+      if (!response.ok) throw new Error("Could not sign out. Try again.");
+      identity(null); revision.current = -1; status("connecting"); setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not sign out."); }
+    finally { busyRef.current = false; setBusy(false); }
+  }, [identity, status]);
+  const value = useMemo(() => ({ state, dispatch, syncStatus, playerId, sessionReady, busy, pending, error: error || connectionError, lastSync, serverOffset, canWrite: !!playerId && syncStatus === "shared" && !busy && !pending, login, logout, retryPending, refresh }), [state, dispatch, syncStatus, playerId, sessionReady, busy, pending, error, connectionError, lastSync, serverOffset, login, logout, retryPending, refresh]);
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
-
 export function useStore() {
   const context = useContext(StoreContext);
   if (!context) throw new Error("useStore must be used inside StoreProvider");

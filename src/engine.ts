@@ -1,4 +1,4 @@
-import { GAME_IDS, PLAYER_IDS } from "./data";
+import { PLAYER_IDS } from "./data";
 import type { AppState, EventFormat, GameId, PlayerId, ScheduledEvent, TeamId } from "./types";
 
 export interface PlayerRecord {
@@ -32,12 +32,9 @@ export function formatAmericanOdds(decimalOdds: number) {
 }
 
 export function isBettingOpen(event: ScheduledEvent, now = Date.now()) {
-  if (event.status === "betting") {
-    return event.bettingReopened === true || new Date(event.bettingClosesAt ?? event.scheduledAt).getTime() > now;
-  }
-  return event.status === "scheduled" && (event.bettingReopened === true || new Date(event.scheduledAt).getTime() > now);
+  return event.status === "betting" && Number.isFinite(Date.parse(event.bettingClosesAt ?? ""))
+    && Date.parse(event.bettingClosesAt!) > now;
 }
-
 function expectedScore(a: number, b: number) {
   return 1 / (1 + Math.pow(10, (b - a) / 400));
 }
@@ -59,7 +56,7 @@ export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] 
       const ratingA = teamA.playerIds.reduce((sum, id) => sum + table[id].rating, 0) / 2;
       const ratingB = teamB.playerIds.reduce((sum, id) => sum + table[id].rating, 0) / 2;
       const scoreA = event.result.winningTeamId === teamAId ? 1 : 0;
-      const deltaA = K_FACTOR * (scoreA - expectedScore(ratingA, ratingB));
+      const deltaA = K_FACTOR * (event.ratingWeight ?? 1) * (scoreA - expectedScore(ratingA, ratingB));
       teamA.playerIds.forEach((id) => {
         table[id].rating += deltaA;
         table[id][scoreA ? "wins" : "losses"] += 1;
@@ -79,7 +76,7 @@ export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] 
         for (let b = a + 1; b < ordered.length; b += 1) {
           const winner = table[ordered[a]];
           const loser = table[ordered[b]];
-          const delta = (K_FACTOR / Math.max(1, ordered.length - 1)) * (1 - expectedScore(winner.rating, loser.rating));
+          const delta = (K_FACTOR * (event.ratingWeight ?? 1) / Math.max(1, ordered.length - 1)) * (1 - expectedScore(winner.rating, loser.rating));
           winner.rating += delta;
           loser.rating -= delta;
         }
@@ -92,9 +89,9 @@ export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] 
 
 export function getBlendedPlayerRating(state: AppState, playerId: PlayerId, gameId: GameId) {
   const gameRating = getGameRecords(state, gameId).find((record) => record.playerId === playerId)?.rating ?? 1000;
-  const overall = GAME_IDS.reduce((sum, id) => {
+  const overall = Object.keys(state.games).reduce((sum, id) => {
     return sum + (getGameRecords(state, id).find((record) => record.playerId === playerId)?.rating ?? 1000);
-  }, 0) / GAME_IDS.length;
+  }, 0) / Math.max(1, Object.keys(state.games).length);
   return gameRating * 0.75 + overall * 0.25;
 }
 
@@ -133,7 +130,11 @@ export function getFreeForAllShares(count: number) {
   if (count === 2) return [0.7, 0.3];
   if (count === 3) return [0.6, 0.3, 0.1];
   if (count === 4) return [0.5, 0.3, 0.15, 0.05];
-  throw new Error("Free-for-all events require two to four players.");
+  if (count === 5) return [0.4, 0.25, 0.15, 0.12, 0.08];
+  if (count === 6) return [0.35, 0.25, 0.15, 0.1, 0.1, 0.05];
+  if (count === 7) return [0.3, 0.22, 0.16, 0.12, 0.09, 0.07, 0.04];
+  if (count === 8) return [0.28, 0.2, 0.15, 0.12, 0.09, 0.07, 0.05, 0.04];
+  throw new Error("Free-for-all events require two to eight players.");
 }
 
 export function canPlayerBet(state: AppState, event: ScheduledEvent, selectionId: string, playerId: PlayerId) {

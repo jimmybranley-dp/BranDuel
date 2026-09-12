@@ -1,5 +1,7 @@
 BranDuel: Monday review and event-night plan
 
+September 5 update: the first two implementation steps are complete. The original findings below are preserved as the pre-change review. See README.md for the current behavior and startup instructions. The old defect probe script now runs regression tests. The current suite has 49 passing tests, a passing client/Worker production build, and a successful isolated local Worker/D1 event rehearsal. Cloudflare staging/deployment and the room-wide rehearsal are still pending.
+
 Prepared September 4, 2026, for the working session on Monday, September 7. The event date is not specified.
 
 BranDuel has the right core experience for the Degenerate Derby. Four fictional sports franchises compete, earn large purses, back themselves, and watch their fortunes change together. The next build should make that experience dependable and easy to run while Jimmy is also playing. The current build needs repairs before event use.

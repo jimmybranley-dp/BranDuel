@@ -2,7 +2,12 @@ import type { AppState, Game, GameId, Player, PlayerId, ScheduledEvent, Team, Te
 
 export const PLAYER_IDS: PlayerId[] = ["jason", "ezra", "corey", "jimmy", "brandon", "andrew", "bruce", "ryan"];
 export const TEAM_IDS: TeamId[] = ["jason-ezra", "corey-jimmy", "brandon-andrew", "bruce-ryan"];
-export const GAME_IDS: GameId[] = ["smash", "boomerang", "worms", "mario-party"];
+export const GAME_IDS: GameId[] = ["smash", "boomerang", "worms", "mario-party", "mario-kart", "nfl-blitz", "billiards"];
+
+export function maxFreeForAllPlayers(gameId: GameId) {
+  void gameId;
+  return 8;
+}
 
 export const players: Record<PlayerId, Player> = {
   jason: { id: "jason", name: "Jason", teamId: "jason-ezra" },
@@ -23,17 +28,20 @@ export const teams: Record<TeamId, Team> = {
 };
 
 export const games: Record<GameId, Game> = {
-  smash: { id: "smash", name: "Super Smash Bros.", shortName: "Smash", payout: 500_000, bettable: true },
-  boomerang: { id: "boomerang", name: "Boomerang Fu", shortName: "Boomerang", payout: 250_000, bettable: true },
-  worms: { id: "worms", name: "Worms", shortName: "Worms", payout: 250_000, bettable: true },
-  "mario-party": { id: "mario-party", name: "Mario Party", shortName: "Mario Party", payout: 100_000, bettable: false },
+  smash: { id: "smash", name: "Super Smash Bros.", shortName: "Smash", payout: 1_500_000, bettable: true },
+  boomerang: { id: "boomerang", name: "Boomerang Fu", shortName: "Boomerang", payout: 1_250_000, bettable: true },
+  worms: { id: "worms", name: "Worms", shortName: "Worms", payout: 1_750_000, bettable: true },
+  "mario-party": { id: "mario-party", name: "Mario Party", shortName: "Mario Party", payout: 3_000_000, bettable: false },
+  "mario-kart": { id: "mario-kart", name: "Mario Kart", shortName: "Mario Kart", payout: 1_500_000, bettable: true },
+  "nfl-blitz": { id: "nfl-blitz", name: "NFL Blitz", shortName: "NFL Blitz", payout: 1_750_000, bettable: true },
+  billiards: { id: "billiards", name: "Billiards", shortName: "Billiards", payout: 1_250_000, bettable: true },
 };
 
 function offsetIso(hours: number) {
   return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
 }
 
-function sampleEvents(): ScheduledEvent[] {
+export function sampleEvents(): ScheduledEvent[] {
   return [
     {
       id: "evt-smash-opener",
@@ -75,29 +83,58 @@ export function createInitialState(): AppState {
   const startingBankroll = 10_000_000;
   return {
     currentPlayerId: "jimmy",
-    teams,
-    players,
-    games,
+    teams: structuredClone(teams),
+    players: structuredClone(players),
+    games: structuredClone(games),
     balances: {
       "jason-ezra": startingBankroll,
       "corey-jimmy": startingBankroll,
       "brandon-andrew": startingBankroll,
       "bruce-ryan": startingBankroll,
     },
-    events: sampleEvents(),
+    events: [],
     bets: [],
-    ledger: [],
+    ledger: TEAM_IDS.map((teamId) => ({ id: `opening-${teamId}`, teamId, amount: startingBankroll, type: "opening-grant", description: "Opening bankroll", createdAt: new Date().toISOString(), actorId: "jimmy" })),
+    bankAdjustments: [],
     settings: {
       startingBankroll,
       minimumBet: 25_000,
       maximumBet: 500_000,
       houseEdge: 0.05,
       payouts: {
-        smash: 500_000,
-        boomerang: 250_000,
-        worms: 250_000,
-        "mario-party": 100_000,
+        smash: 1_500_000,
+        boomerang: 1_250_000,
+        worms: 1_750_000,
+        "mario-party": 3_000_000,
+        "mario-kart": 1_500_000,
+        "nfl-blitz": 1_750_000,
+        billiards: 1_250_000,
       },
     },
+  };
+}
+
+export function normalizeState(value: AppState): AppState {
+  const initial = createInitialState();
+  return {
+    ...initial,
+    ...value,
+    teams: { ...initial.teams, ...value.teams },
+    players: { ...initial.players, ...value.players },
+    games: { ...initial.games, ...value.games },
+    balances: { ...initial.balances, ...value.balances },
+    settings: {
+      ...initial.settings,
+      ...value.settings,
+      payouts: { ...initial.settings.payouts, ...value.settings?.payouts },
+    },
+    events: value.events ?? [],
+    bets: value.bets ?? [],
+    ledger: value.ledger ?? [],
+    bankAdjustments: value.bankAdjustments ?? (value.ledger ?? []).filter((entry) => entry.type === "admin-adjustment").map((entry) => ({ id: entry.id, teamId: entry.teamId, amount: entry.amount, note: entry.description, actorId: entry.actorId ?? "jimmy", createdAt: entry.createdAt, ledgerEntryId: entry.id })),
+    gameNight: value.gameNight ? {
+      ...value.gameNight,
+      activeEventIds: value.gameNight.activeEventIds ?? (value.gameNight.activeEventId ? [value.gameNight.activeEventId] : []),
+    } : undefined,
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState } from "./data";
+import { createInitialState, sampleEvents } from "./data";
 import { canPlayerBet, formatAmericanOdds, generateOdds, getBetRestrictionReason, getFreeForAllShares, isBettingOpen } from "./engine";
 
 describe("BranDuel rules", () => {
@@ -20,21 +20,23 @@ describe("BranDuel rules", () => {
 
   it("only lets a participant back their own side", () => {
     const state = createInitialState();
-    const event = state.events[0];
+    const event = sampleEvents()[0];
     expect(canPlayerBet(state, event, "corey-jimmy", "jimmy")).toBe(true);
     expect(canPlayerBet(state, event, "jason-ezra", "jimmy")).toBe(false);
   });
 
   it("blocks a player when only their teammate is in a free-for-all", () => {
     const state = createInitialState();
-    const event = state.events[1];
+    const event = sampleEvents()[1];
     expect(canPlayerBet(state, event, "andrew", "brandon")).toBe(false);
     expect(canPlayerBet(state, event, "corey", "jimmy")).toBe(false);
     expect(getBetRestrictionReason(state, event, "jimmy")).toBe("Corey is playing, so your team cannot bet on this match.");
   });
 
   it("closes betting at the scheduled start", () => {
-    const event = createInitialState().events[0];
+    const event = sampleEvents()[0];
+    event.status = "betting";
+    event.bettingClosesAt = event.scheduledAt;
     expect(isBettingOpen(event, new Date(event.scheduledAt).getTime() - 1)).toBe(true);
     expect(isBettingOpen(event, new Date(event.scheduledAt).getTime())).toBe(false);
   });
