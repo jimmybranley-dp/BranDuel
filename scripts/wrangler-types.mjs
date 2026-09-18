@@ -17,7 +17,7 @@ export function canonicalizeGeneratedTypes(source) {
     )
     .replace(
       /\n[ \t]*interface GlobalProps \{[\s\S]*?\n[ \t]*\}\n(?=[ \t]*interface (?:StagingEnv|ProductionEnv))/g,
-      "",
+      "\n",
     );
 }
 
