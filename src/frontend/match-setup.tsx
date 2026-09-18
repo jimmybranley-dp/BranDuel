@@ -53,7 +53,7 @@ export function LiveRoundBuilder({ notify, mode = "derby", title, submitLabel }:
   return (
     <form className="live-builder" aria-describedby={error ? "matchup-error" : undefined} onSubmit={openRound}>
       <div className="live-builder-title">
-        <div><span>{mode === "prep" ? "Ratings warmup" : title ? "Next market" : "Next round"}</span><h2>{mode === "prep" ? "Log a prep game" : title ?? "Build the matchup"}</h2></div>
+        <div><span>{mode === "prep" ? "Heat warmup" : title ? "Next market" : "Next round"}</span><h2>{mode === "prep" ? "Log a prep game" : title ?? "Build the matchup"}</h2></div>
         <Target size={30} weight="bold" />
       </div>
       <div className="live-builder-grid">
@@ -113,7 +113,7 @@ export function ActiveMatchSetup({ notify }: { notify: (message: string) => void
   return (
     <div className="page page-enter game-night-page">
       <div className="night-header">
-        <div><p className="eyebrow">Match Setup</p><h1>Run the next round.</h1><p>{activeEvents.length} of {MAX_ACTIVE_EVENTS} rounds active. Open a matchup, start play, then log the official result.</p></div>
+      <div><p className="eyebrow">Match Setup</p><h1>Run the next round.</h1><p>{activeEvents.length} of {MAX_ACTIVE_EVENTS} rounds active. Open a matchup, start play, then log the official result. Prep sets the opening live Heat.</p></div>
       </div>
       <div className="night-status-strip"><span><Clock size={17} /> Started {new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(night.startedAt))}</span><strong>{nightMode === "prep" ? "Prep mode" : "Live Night"} · {completedCount} rounds settled</strong>{state.currentPlayerId === "jimmy" && !activeEvents.length && nightMode === "live" && <button onClick={async () => { if (window.confirm("Enable Prep mode? This is only available before live play begins.")) { if (await dispatch({ type: "SET_GAME_NIGHT_MODE", mode: "prep" })) notify("Prep mode enabled for everyone."); } }}>Enable Prep mode</button>}{state.currentPlayerId === "jimmy" && !activeEvents.length && nightMode === "prep" && <button onClick={async () => { if (window.confirm("Start Live Night? Prep mode will close for everyone and betting rounds can begin.")) { if (await dispatch({ type: "SET_GAME_NIGHT_MODE", mode: "live" })) notify("Live Night started. Betting rounds are available."); } }}>Start Live Night</button>}{state.currentPlayerId === "jimmy" && !activeEvents.length && <button onClick={async () => { if (window.confirm("Close Game Night and freeze final standings? All matchups and wagers must be finished or voided. This archive cannot be edited.")) { if (await dispatch({ type: "END_GAME_NIGHT" })) notify("Game Night closed. Final standings are archived."); } }}>Review closeout</button>}</div>
 

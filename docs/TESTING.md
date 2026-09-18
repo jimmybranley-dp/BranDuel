@@ -71,7 +71,7 @@ Do not broadly increase timeouts or remove meaningful tests to improve elapsed t
 
 The Vitest and Vite wrappers create a temporary Wrangler config alongside their isolated OS-temporary state/log path. They disable dotenv loading, so repository `.dev.vars` and `.env` files are never consulted by build or unit-test verification. The event and browser runners use a temporary config directory with no credential files and enable process-environment loading only for the in-memory ephemeral credentials they create for that run. All wrappers print bounded startup diagnostics containing the Node runtime, working directory, config file, temporary state path, and sanitized error category. The event and browser runners additionally write bootstrap artifacts that distinguish migration failure, server exit before readiness, readiness timeout, browser launch failure, and test assertion failure. A zero-record event artifact includes `workerRequestsRan: false` and the failed bootstrap phase.
 
-Simulation commands are `npm run sim:economy:fast`, `npm run sim:economy:stress`, and `npm run sim:economy:replay` (the replay accepts `ECONOMY_SEED`, `ECONOMY_NIGHTS`, and `ECONOMY_ROUNDS`).
+Simulation commands are `npm run sim:heat`, `npm run sim:economy:fast`, `npm run sim:economy:stress`, and `npm run sim:economy:replay` (the replay accepts `ECONOMY_SEED`, `ECONOMY_NIGHTS`, and `ECONOMY_ROUNDS`). Heat simulation uses the dotenv-disabled Vitest wrapper.
 
 ## Required checks by change type
 

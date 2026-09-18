@@ -1,5 +1,5 @@
 import { PLAYER_IDS } from "./data";
-import type { AppState, EventFormat, GameId, PlayerId, ScheduledEvent, TeamId } from "./types";
+import type { AppState, EventFormat, EventMode, GameId, PlayerId, ScheduledEvent, TeamId } from "./types";
 
 export interface PlayerRecord {
   playerId: PlayerId;
@@ -9,6 +9,39 @@ export interface PlayerRecord {
 }
 
 const K_FACTOR = 28;
+
+/** Calibration constants for the entertainment-oriented current-night line. */
+export const HEAT_CONFIG = {
+  nightFormWeight: 0.65,
+  gameFormWeight: 0.35,
+  recencyWeights: [1, 0.65, 0.4, 0.25] as const,
+  exponentialSensitivity: 0.31,
+  twoWayMinimum: 0.28,
+  twoWayMaximum: 0.72,
+  multiwayMinimumFactor: 0.5,
+  multiwayMaximumFactor: 2.2,
+  multiwayMaximum: 0.55,
+} as const;
+
+export interface HeatAppearance {
+  eventId: string;
+  gameId: GameId;
+  playerId: PlayerId;
+  mode: EventMode | "live";
+  completedAt: string;
+  performance: number;
+  ratingWeight: number;
+}
+
+export interface PlayerHeat {
+  playerId: PlayerId;
+  gameId: GameId;
+  nightForm: number;
+  gameForm: number;
+  lineScore: number;
+  nightAppearances: HeatAppearance[];
+  gameAppearances: HeatAppearance[];
+}
 
 export function formatMoney(value: number, compact = false) {
   if (compact) {
@@ -39,6 +72,83 @@ function expectedScore(a: number, b: number) {
   return 1 / (1 + Math.pow(10, (b - a) / 400));
 }
 
+function safeRatingWeight(value: number | undefined) {
+  return value === undefined ? 1 : Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function eventBelongsToNight(event: ScheduledEvent, state: AppState) {
+  const night = state.gameNight;
+  if (!night) return false;
+  return event.gameNightId === night.id || (event.gameNightId === undefined && night.eventIds.includes(event.id));
+}
+
+function orderedTeamIds(event: ScheduledEvent) {
+  const participants = event.teamIds ?? event.participants?.teamIds ?? [];
+  if (event.result?.orderedTeamIds) return event.result.orderedTeamIds;
+  if (event.result?.winningTeamId) return [event.result.winningTeamId, ...participants.filter((id) => id !== event.result?.winningTeamId)];
+  return [];
+}
+
+function resultPerformances(state: AppState, event: ScheduledEvent) {
+  const weight = safeRatingWeight(event.ratingWeight);
+  if (event.format === "teams") {
+    const ordered = orderedTeamIds(event);
+    const participants = event.teamIds ?? event.participants?.teamIds ?? [];
+    if (ordered.length < 2 || ordered.length > 4 || ordered.length !== participants.length || new Set(ordered).size !== ordered.length || ordered.some((id) => !participants.includes(id) || !state.teams[id])) return [];
+    return ordered.flatMap((teamId, index) => {
+      const performance = 1 - (2 * index) / (ordered.length - 1);
+      return state.teams[teamId].playerIds.map((playerId) => ({ playerId, performance, ratingWeight: weight }));
+    });
+  }
+
+  const ordered = event.result?.orderedPlayerIds ?? [];
+  const participants = event.playerIds ?? event.participants?.playerIds ?? [];
+  if (ordered.length < 2 || ordered.length > 8 || ordered.length !== participants.length || new Set(ordered).size !== ordered.length || ordered.some((id) => !participants.includes(id) || !state.players[id])) return [];
+  return ordered.map((playerId, index) => ({ playerId, performance: 1 - (2 * index) / (ordered.length - 1), ratingWeight: weight }));
+}
+
+/** Completed current-night appearances, with prep and live sharing one sequence. */
+export function getCurrentNightHeatAppearances(state: AppState): HeatAppearance[] {
+  if (!state.gameNight) return [];
+  return state.events
+    .filter((event) => eventBelongsToNight(event, state) && event.status === "completed" && Boolean(event.result))
+    .flatMap((event) => resultPerformances(state, event).map(({ playerId, performance, ratingWeight }) => ({
+      eventId: event.id,
+      gameId: event.gameId,
+      playerId,
+      mode: (event.mode === "prep" ? "prep" : "live") as EventMode | "live",
+      completedAt: event.settledAt ?? event.scheduledAt ?? event.createdAt,
+      performance,
+      ratingWeight,
+    })))
+    .sort((a, b) => b.completedAt.localeCompare(a.completedAt) || b.eventId.localeCompare(a.eventId));
+}
+
+function recentAppearances(appearances: HeatAppearance[], playerId: PlayerId, gameId?: GameId) {
+  return appearances.filter((appearance) => appearance.playerId === playerId && (gameId === undefined || appearance.gameId === gameId)).slice(0, HEAT_CONFIG.recencyWeights.length);
+}
+
+function weightedForm(appearances: HeatAppearance[]) {
+  return appearances.reduce((sum, appearance, index) => sum + appearance.performance * appearance.ratingWeight * HEAT_CONFIG.recencyWeights[index], 0);
+}
+
+export function getPlayerHeat(state: AppState, playerId: PlayerId, gameId: GameId): PlayerHeat {
+  const appearances = getCurrentNightHeatAppearances(state);
+  const nightAppearances = recentAppearances(appearances, playerId);
+  const gameAppearances = recentAppearances(appearances, playerId, gameId);
+  const nightForm = weightedForm(nightAppearances);
+  const gameForm = weightedForm(gameAppearances);
+  return { playerId, gameId, nightForm, gameForm, lineScore: HEAT_CONFIG.nightFormWeight * nightForm + HEAT_CONFIG.gameFormWeight * gameForm, nightAppearances, gameAppearances };
+}
+
+export function getCurrentNightHeat(state: AppState, gameId: GameId) {
+  return Object.fromEntries(PLAYER_IDS.map((playerId) => [playerId, getPlayerHeat(state, playerId, gameId)])) as Record<PlayerId, PlayerHeat>;
+}
+
+export function getHeatLineScore(state: AppState, playerId: PlayerId, gameId: GameId) {
+  return getPlayerHeat(state, playerId, gameId).lineScore;
+}
+
 export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] {
   const table = Object.fromEntries(
     PLAYER_IDS.map((playerId) => [playerId, { playerId, wins: 0, losses: 0, rating: 1000 }]),
@@ -56,7 +166,7 @@ export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] 
       const ratingA = teamA.playerIds.reduce((sum, id) => sum + table[id].rating, 0) / 2;
       const ratingB = teamB.playerIds.reduce((sum, id) => sum + table[id].rating, 0) / 2;
       const scoreA = event.result.winningTeamId === teamAId ? 1 : 0;
-      const deltaA = K_FACTOR * (event.ratingWeight ?? 1) * (scoreA - expectedScore(ratingA, ratingB));
+      const deltaA = K_FACTOR * safeRatingWeight(event.ratingWeight) * (scoreA - expectedScore(ratingA, ratingB));
       teamA.playerIds.forEach((id) => {
         table[id].rating += deltaA;
         table[id][scoreA ? "wins" : "losses"] += 1;
@@ -76,7 +186,7 @@ export function getGameRecords(state: AppState, gameId: GameId): PlayerRecord[] 
         for (let b = a + 1; b < ordered.length; b += 1) {
           const winner = table[ordered[a]];
           const loser = table[ordered[b]];
-          const delta = (K_FACTOR * (event.ratingWeight ?? 1) / Math.max(1, ordered.length - 1)) * (1 - expectedScore(winner.rating, loser.rating));
+          const delta = (K_FACTOR * safeRatingWeight(event.ratingWeight) / Math.max(1, ordered.length - 1)) * (1 - expectedScore(winner.rating, loser.rating));
           winner.rating += delta;
           loser.rating -= delta;
         }
@@ -95,16 +205,56 @@ export function getBlendedPlayerRating(state: AppState, playerId: PlayerId, game
   return gameRating * 0.75 + overall * 0.25;
 }
 
-function softmaxRatings(entries: Array<[string, number]>, houseEdge: number) {
-  const strengths = entries.map(([id, rating]) => [id, Math.pow(10, rating / 400)] as const);
-  const total = strengths.reduce((sum, [, strength]) => sum + strength, 0);
-  return Object.fromEntries(
-    strengths.map(([id, strength]) => {
-      const probability = strength / total;
-      const decimal = Math.max(1.05, (1 - houseEdge) / probability);
-      return [id, Math.round(decimal * 100) / 100];
-    }),
-  );
+function boundedNormalize(strengths: number[]) {
+  const count = strengths.length;
+  if (!count) return [];
+  const total = strengths.reduce((sum, value) => sum + value, 0);
+  const normalized = strengths.map((value) => value / total);
+  if (count === 2) {
+    if (Math.abs(normalized[0] - normalized[1]) < Number.EPSILON) return [0.5, 0.5];
+    const favorite = normalized[0] > normalized[1] ? 0 : 1;
+    const favoriteProbability = Math.min(HEAT_CONFIG.twoWayMaximum, Math.max(0.5, normalized[favorite]));
+    const result = [0, 0];
+    result[favorite] = favoriteProbability;
+    result[1 - favorite] = 1 - favoriteProbability;
+    return result;
+  }
+
+  const minimum = HEAT_CONFIG.multiwayMinimumFactor / count;
+  const maximum = Math.min(HEAT_CONFIG.multiwayMaximum, HEAT_CONFIG.multiwayMaximumFactor / count);
+  const result = Array<number>(count).fill(0);
+  const open = normalized.map((_, index) => index);
+  let remaining = 1;
+  while (open.length) {
+    const strengthTotal = open.reduce((sum, index) => sum + strengths[index], 0);
+    const lower = open.filter((index) => (remaining * strengths[index]) / strengthTotal < minimum);
+    const upper = open.filter((index) => (remaining * strengths[index]) / strengthTotal > maximum);
+    if (!lower.length && !upper.length) {
+      open.forEach((index) => { result[index] = (remaining * strengths[index]) / strengthTotal; });
+      break;
+    }
+    [...lower, ...upper].forEach((index) => {
+      result[index] = lower.includes(index) ? minimum : maximum;
+      remaining -= result[index];
+      open.splice(open.indexOf(index), 1);
+    });
+  }
+  const residual = 1 - result.reduce((sum, value) => sum + value, 0);
+  if (Math.abs(residual) > 1e-12) {
+    const target = result.findIndex((value) => value > minimum + 1e-12 && value < maximum - 1e-12);
+    if (target >= 0) result[target] += residual;
+  }
+  return result;
+}
+
+/** Converts Heat scores to fair probabilities before applying the house edge. */
+export function getFairProbabilities(entries: Array<[string, number]>) {
+  const strengths = entries.map(([, score]) => {
+    const safeScore = Number.isFinite(score) ? Math.max(-100, Math.min(100, score)) : 0;
+    return Math.exp(HEAT_CONFIG.exponentialSensitivity * safeScore);
+  });
+  const probabilities = boundedNormalize(strengths);
+  return Object.fromEntries(entries.map(([id], index) => [id, probabilities[index]]));
 }
 
 export function generateOdds(
@@ -113,17 +263,18 @@ export function generateOdds(
   format: EventFormat,
   participantIds: string[],
 ) {
-  if (format === "free-for-all") {
-    const entries = participantIds.map((id) => [id, getBlendedPlayerRating(state, id as PlayerId, gameId)] as [string, number]);
-    return softmaxRatings(entries, state.settings.houseEdge);
-  }
-
   const entries = participantIds.map((id) => {
+    if (format === "free-for-all") return [id, getHeatLineScore(state, id as PlayerId, gameId)] as [string, number];
     const team = state.teams[id as TeamId];
-    const rating = team.playerIds.reduce((sum, playerId) => sum + getBlendedPlayerRating(state, playerId, gameId), 0) / 2;
-    return [id, rating] as [string, number];
+    const score = team ? team.playerIds.reduce((sum, playerId) => sum + getHeatLineScore(state, playerId, gameId), 0) / team.playerIds.length : 0;
+    return [id, score] as [string, number];
   });
-  return softmaxRatings(entries, state.settings.houseEdge);
+  const fair = getFairProbabilities(entries);
+  return Object.fromEntries(entries.map(([id]) => {
+    const probability = fair[id] ?? 1 / Math.max(1, entries.length);
+    const decimal = Math.max(1.05, (1 - state.settings.houseEdge) / probability);
+    return [id, Math.round(decimal * 100) / 100];
+  }));
 }
 
 export function getFreeForAllShares(count: number) {

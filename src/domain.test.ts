@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createInitialState, GAME_IDS, normalizeState, TEAM_IDS } from "./data";
 import { applyAction, DomainError, parseAction } from "./domain";
-import { getGameRecords, isBettingOpen } from "./engine";
+import { generateOdds, getGameRecords, isBettingOpen } from "./engine";
 import type { AppState } from "./types";
 
 function live(format: "teams" | "free-for-all" = "teams") {
@@ -257,6 +257,29 @@ describe("Commissioner corrections and finale", () => {
     expect(getGameRecords(s, "smash").find((record) => record.playerId === "corey")?.wins).toBe(1);
     s = applyAction(s, { type: "CANCEL_EVENT", eventId, reason: "Disputed prep result" }, "jimmy");
     expect(getGameRecords(s, "smash").every((record) => record.wins === 0 && record.rating === 1000)).toBe(true);
+  });
+
+  it("uses corrected and voided Prep results for future Heat without rewriting frozen markets", () => {
+    let s = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jimmy");
+    s = applyAction(s, { type: "SET_GAME_NIGHT_MODE", mode: "prep" }, "jimmy");
+    s = applyAction(s, { type: "CREATE_PREP_EVENT", payload: { gameId: "smash", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"] } }, "jimmy");
+    const prepId = s.events[0].id;
+    s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId: prepId, winningTeamId: "jason-ezra" }, "jason");
+    s = applyAction(s, { type: "SET_GAME_NIGHT_MODE", mode: "live" }, "jimmy");
+    s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "smash", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], bettingSeconds: 60 } }, "jimmy");
+    const marketId = s.events[0].id;
+    const frozenOdds = structuredClone(s.events[0].odds);
+    expect(frozenOdds).toEqual({ "jason-ezra": 1.46, "corey-jimmy": 2.72 });
+
+    s = applyAction(s, { type: "CORRECT_RESULT", eventId: prepId, result: { winningTeamId: "corey-jimmy" }, reason: "Video review" }, "jimmy");
+    expect(s.events.find((event) => event.id === marketId)?.odds).toEqual(frozenOdds);
+    s = applyAction(s, { type: "CANCEL_EVENT", eventId: marketId }, "jimmy");
+    s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "smash", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], bettingSeconds: 60 } }, "jimmy");
+    expect(s.events[0].odds).toEqual({ "jason-ezra": 2.72, "corey-jimmy": 1.46 });
+
+    s = applyAction(s, { type: "CANCEL_EVENT", eventId: prepId, reason: "Prep result void" }, "jimmy");
+    s = applyAction(s, { type: "CANCEL_EVENT", eventId: s.events[0].id }, "jimmy");
+    expect(generateOdds(s, "smash", "teams", ["jason-ezra", "corey-jimmy"])).toEqual({ "jason-ezra": 1.9, "corey-jimmy": 1.9 });
   });
 
   it("reverses and reapplies results repeatedly without changing accepted odds", () => {

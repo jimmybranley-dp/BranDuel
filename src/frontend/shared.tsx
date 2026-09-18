@@ -36,7 +36,7 @@ export const ICONS: Partial<Record<GameId, ComponentType<IconProps>>> = {
 export const NAV: Array<{ id: View; label: string; icon: ComponentType<IconProps> }> = [
   { id: "home", label: "Home", icon: House },
   { id: "match-setup", label: "Match Setup", icon: Target },
-  { id: "ratings", label: "Ratings", icon: ChartBar },
+  { id: "ratings", label: "Heat", icon: ChartBar },
   { id: "bank", label: "Team Bank", icon: Wallet },
 ];
 

@@ -31,19 +31,29 @@ This document separates behavior verified by the current code/tests from decisio
 - Scheduling is not supported. A normal event is created live when the matchup is ready; the legacy `scheduled` status is retained only so old snapshots can be safely voided.
 - Closeout requires every event to be completed or cancelled and every ticket to be resolved. Closeout freezes the final snapshot and archive.
 
+### Current-night Heat lines
+
+Heat is an entertainment-oriented current-night signal, not a statistically precise long-term skill rating. The Worker derives it from completed, non-voided events in the active Game Night; historical W–L records and Elo-style ratings remain factual records and are not the primary betting input.
+
+Prep results seed opening live odds at full weight. Prep and live appearances share one recency sequence, so Prep influence ages out as newer appearances are logged instead of disappearing at the mode switch. A new Game Night starts with neutral Heat, while a new economy season follows the existing reset contract for active result history.
+
+For each player, the four newest current-night appearances use recency weights `1.00`, `0.65`, `0.40`, and `0.25`. `nightForm` spans all games and `gameForm` is game-specific; the line score is `0.65 × nightForm + 0.35 × gameForm`. Selection strength is `exp(0.31 × lineScore)`, then fair probabilities are normalized and bounded at `0.28–0.72` for two selections. For `N > 2`, bounds are `0.5 / N` through `min(0.55, 2.2 / N)`. The 5% house edge is applied only after fair probabilities are valid.
+
+Odds are generated and snapshotted when a live market opens. Later results, corrections, and voids affect only future markets; wager volume never moves a line. Accepted odds remain frozen for open and completed markets.
+
 ### Roles and permissions
 
 All permissions below are enforced by the Worker using the authenticated session actor, not by a client-selected identity.
 
-| Capability                                                        | Any signed-in player | Jimmy / commissioner |
-| ----------------------------------------------------------------- | -------------------- | -------------------- |
-| Start the night                                                   | No                   | Yes                  |
-| Create a live matchup, start play, report a result, run a rematch | Yes                  | Yes                  |
-| Place or edit an allowed team ticket                              | Yes                  | Yes                  |
-| Correct or void/refund a round                                    | No                   | Yes                  |
-| Pause betting, change economy/team names/games, adjust a bank     | No                   | Yes                  |
-| Change night mode, close out, reset                               | No                   | Yes                  |
-| Export the event archive                                          | No                   | Yes                  |
+| Capability                                                                                    | Any signed-in player | Jimmy / commissioner |
+| --------------------------------------------------------------------------------------------- | -------------------- | -------------------- |
+| Start the night                                                                               | No                   | Yes                  |
+| Create a live matchup, undo it before play starts, start play, report a result, run a rematch | Yes                  | Yes                  |
+| Place or edit an allowed team ticket                                                          | Yes                  | Yes                  |
+| Correct or void/refund a round                                                                | No                   | Yes                  |
+| Pause betting, change economy/team names/games, adjust a bank                                 | No                   | Yes                  |
+| Change night mode, close out, reset                                                           | No                   | Yes                  |
+| Export the event archive                                                                      | No                   | Yes                  |
 
 The command domain contains a prep action for the optional warmup mode. Scheduling actions are intentionally absent; legacy scheduled snapshots may only be recovered or voided.
 
@@ -56,7 +66,7 @@ The command domain contains a prep action for the optional warmup mode. Scheduli
 5. **Commissioner recovery:** Jimmy may pause betting, reopen an eligible expired market before play, void/refund, correct a completed result with a reason, inspect balances, export, and close out.
 6. **Close:** finish or void every draft/round and resolve every ticket; Jimmy closes the night and then uses the frozen archive for the final recap.
 
-Prep mode, if intentionally enabled by Jimmy before live play, runs non-betting games whose results count toward ratings at full weight while having no betting, purse, bankroll, or ledger effect.
+Prep mode, if intentionally enabled by Jimmy before live play, runs non-betting games whose results seed current-night Heat at full weight while having no betting, purse, bankroll, or ledger effect.
 
 ## Product invariants
 
@@ -67,7 +77,7 @@ Prep mode, if intentionally enabled by Jimmy before live play, runs non-betting 
 - Settlement and correction preserve money conservation and a reconstructable ledger.
 - Results cannot be settled before play, and final closeout cannot leave unresolved work.
 - Archived nights are frozen; ordinary new nights carry balances forward rather than silently resetting the league.
-- Jimmy may explicitly reset the league for a new season only after all prior work is closed. This clears active game results, derived ratings, wagers, and closeout archives, then creates fresh $200,000 opening grants. Immutable server audit and receipt records remain available for accountability.
+- Jimmy may explicitly reset the league for a new season only after all prior work is closed. This clears active game results, derived ratings, Heat inputs, wagers, and closeout archives, then creates fresh $200,000 opening grants. Immutable server audit and receipt records remain available for accountability.
 
 ## Unresolved product decisions
 
@@ -83,6 +93,6 @@ The previously tracked decisions below are now recorded as settled by the produc
 - Scheduling is removed from the product. Legacy scheduled snapshots remain only for safe recovery/void handling.
 - Jimmy alone starts Game Night; any signed-in player may operate normal live rounds after it starts.
 - The official Derby winner is settled in person. The app records results and balances but does not declare the title winner.
-- Prep mode uses full rating weight and remains a pre-live, non-economic mode.
+- Prep mode uses full Heat weight and remains a pre-live, non-economic mode; Prep seeds the opening live line.
 
 See [decision record 0003](decisions/0003-open-product-decisions.md) for the evidence trail.

@@ -2,7 +2,9 @@
 
 ## Navigation
 
-The current app has four primary views: Home, Match Setup, Ratings, and Bank. Desktop uses a side navigation; phone layouts use a fixed bottom navigation with safe-area padding. Match Setup is the live-night center: Jimmy starts the night there, players build/open markets and operate normal rounds, and Jimmy handles closeout.
+The current app has four primary views: Home, Match Setup, Heat, and Bank. Desktop uses a side navigation; phone layouts use a fixed bottom navigation with safe-area padding. Match Setup is the live-night center: Jimmy starts the night there, players build/open markets and operate normal rounds, and Jimmy handles closeout.
+
+The Heat view presents current-night Heat as an entertainment signal, factual W–L records, the four-appearance recency window, Prep/Live source labels, game-specific form, and the frozen-market explanation. It does not calculate or replace accepted market odds.
 
 Match Setup keeps the next live-market builder near the top of the page while fewer than four markets are active. Active markets are listed separately with their own clock, betting state, result controls, and confirmed event identity. Reaching four active markets shows the limit and removes the builder. Settling or voiding one market removes only that market from the active list, so the remaining markets continue unchanged.
 

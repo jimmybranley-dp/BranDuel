@@ -8,7 +8,7 @@ import {
 import { applyAction } from "./domain";
 
 describe("prep mode product contract", () => {
-  it("keeps full rating weight and the non-economic promise in one shared contract", () => {
+  it("keeps full Heat weight and the non-economic promise in one shared contract", () => {
     let state = applyAction(
       createInitialState(),
       { type: "START_GAME_NIGHT" },
@@ -47,7 +47,9 @@ describe("prep mode product contract", () => {
       new URL("./frontend/match-setup.tsx", import.meta.url),
       "utf8",
     );
-    expect(product).toContain("results count toward ratings at full weight");
+    expect(product).toContain(
+      "Prep results seed opening live odds at full weight",
+    );
     expect(product).toContain("no betting, purse, bankroll, or ledger effect");
     expect(setup).toContain("PREP_RATING_COPY");
   });

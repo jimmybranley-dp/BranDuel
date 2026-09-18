@@ -217,7 +217,8 @@ legend small { margin-left: 8px; color: var(--muted-2); }
 .leader-player strong { font-size: 13px; }
 .leader-player small { margin-top: 2px; color: var(--muted-2); font-size: 9px; }
 .record { color: var(--muted); font-variant-numeric: tabular-nums; }
-.rating { color: var(--accent); font-variant-numeric: tabular-nums; }
+.rating { display: flex; flex-direction: column; gap: 2px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.rating small { color: var(--muted); font-size: 10px; font-weight: 700; }
 
 .bank-page-head { min-height: 210px; padding: 30px; display: flex; align-items: flex-end; justify-content: space-between; gap: 25px; position: relative; overflow: hidden; border: 1px solid rgba(33,128,255,.35); border-radius: var(--radius); background: linear-gradient(135deg, #0a3c98, #071d40); }
 .bank-page-head::after { content: "$"; position: absolute; right: 4%; top: -80px; color: rgba(255,255,255,.05); font-family: "Barlow Condensed", sans-serif; font-size: 280px; font-weight: 800; }

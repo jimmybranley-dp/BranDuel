@@ -4,7 +4,7 @@ export const PLAYER_IDS: PlayerId[] = ["jason", "ezra", "corey", "jimmy", "brand
 export const TEAM_IDS: TeamId[] = ["jason-ezra", "corey-jimmy", "brandon-andrew", "bruce-ryan"];
 export const GAME_IDS: GameId[] = ["smash", "boomerang", "worms", "mario-party", "mario-kart", "nfl-blitz", "billiards", "golden-tee", "mortal-kombat"];
 export const PREP_RATING_WEIGHT = 1;
-export const PREP_RATING_COPY = "Prep results count toward ratings at full weight while having no betting, purse, bankroll, or ledger effect.";
+export const PREP_RATING_COPY = "Prep results seed live Heat at full weight while having no betting, purse, bankroll, or ledger effect.";
 
 export const PURSE_INCREMENT = 25_000;
 export const MIN_BASE_PURSE = 150_000;

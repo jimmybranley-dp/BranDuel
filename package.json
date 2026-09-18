@@ -37,6 +37,7 @@
     "test:verification-plan": "node --test scripts/verification-plan.test.mjs",
     "test:browser-plan": "node --test scripts/browser-test-plan.test.mjs",
     "sim:economy": "vitest run --config vite.config.ts src/economy-sim.test.ts",
+    "sim:heat": "node scripts/run-vitest.mjs src/heat-sim.test.ts",
     "sim:economy:fast": "vitest run --config vite.config.ts src/economy-sim.test.ts",
     "sim:economy:stress": "set ECONOMY_NIGHTS=500&& set ECONOMY_ROUNDS=12&& set ECONOMY_TIMEOUT_MS=30000&& vitest run --config vite.config.ts src/economy-sim.test.ts",
     "sim:economy:replay": "vitest run --config vite.config.ts src/economy-sim.test.ts",

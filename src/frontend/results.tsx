@@ -50,12 +50,12 @@ export function LiveResultControls({ event, notify, correction = false }: { even
     const accepted = correction
       ? await dispatch({ type: "CORRECT_RESULT", eventId: event.id, result, reason })
       : await dispatch({ type: "SETTLE_EVENT", eventId: event.id, result });
-    if (accepted) notify(event.mode === "prep" ? (correction ? "Prep result corrected. Ratings updated." : "Prep result recorded. Ratings updated.") : (correction ? "Result corrected. Banks, wagers and records updated." : "Round settled. Banks and ratings are updated."));
+    if (accepted) notify(event.mode === "prep" ? (correction ? "Prep result corrected. Heat updated." : "Prep result recorded. Heat updated.") : (correction ? "Result corrected. Banks, wagers and records updated." : "Round settled. Banks, wagers and Heat updated."));
   }
 
   return (
     <div className="live-result">
-      <div className="in-play-banner"><span>{event.mode === "prep" ? "Ratings-only prep game" : correction ? "Correct settled result" : "Match in play"}</span><strong><ParticipantNames event={event} /></strong><GameBadge gameId={event.gameId} /><MatchHost event={event} /></div>
+      <div className="in-play-banner"><span>{event.mode === "prep" ? "Heat-only prep game" : correction ? "Correct settled result" : "Match in play"}</span><strong><ParticipantNames event={event} /></strong><GameBadge gameId={event.gameId} /><MatchHost event={event} /></div>
       {event.format === "teams" ? (
         bracket ? <fieldset><legend>Set the final bracket order</legend><div className="ranking-editor">{teamOrder.map((teamId, index) => <div key={teamId}><strong>{index + 1}</strong><span>{state.teams[teamId].name}</span><div><button type="button" disabled={index === 0} onClick={() => moveTeam(teamId, -1)}>Up</button><button type="button" disabled={index === teamOrder.length - 1} onClick={() => moveTeam(teamId, 1)}>Down</button></div></div>)}</div></fieldset>
           : <fieldset><legend>Tap the winner</legend><div className="winner-grid">{event.teamIds?.map((teamId) => <button type="button" className={winner === teamId ? "selected" : ""} onClick={() => setWinner(teamId)} key={teamId}><Trophy size={21} weight={winner === teamId ? "fill" : "regular"} />{state.teams[teamId].name}</button>)}</div></fieldset>
