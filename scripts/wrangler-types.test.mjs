@@ -68,4 +68,5 @@ test("generated bindings canonicalize Wrangler's workspace-specific main module 
   const canonical = canonicalizeGeneratedTypes(generated);
   doesNotMatch(canonical, /interface GlobalProps \{[\s\S]*mainModule/);
   doesNotMatch(canonical, /home\/runner|tmp\/types/);
+  doesNotMatch(canonical, /Cloudflare \{\n\n/);
 });
