@@ -59,6 +59,7 @@ test("generated bindings canonicalize Wrangler's workspace-specific main module 
     "declare namespace Cloudflare {",
     "  interface GlobalProps {",
     '    mainModule: typeof import("../../home/runner/work/BranDuel/BranDuel/worker/index");',
+    '    durableNamespaces: "ExampleObject";',
     "  }",
     "  interface StagingEnv {}",
     "}",
