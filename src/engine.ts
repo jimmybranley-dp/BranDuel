@@ -173,3 +173,19 @@ export function selectionWon(event: ScheduledEvent, selectionId: string) {
   if (event.format === "teams") return event.result?.winningTeamId === selectionId;
   return event.result?.orderedPlayerIds?.[0] === selectionId;
 }
+
+export function effectiveAvailableBank(state: AppState, event: ScheduledEvent, teamId: string) {
+  const existingStake = state.bets.find((bet) => bet.eventId === event.id && bet.teamId === teamId && bet.status === "open")?.stake ?? 0;
+  return state.balances[teamId as keyof AppState["balances"]] + existingStake;
+}
+
+/**
+ * Returns the actual maximum stake for this team and market. The market rules
+ * are frozen at open; only the confirmed team balance changes between tickets.
+ */
+export function allowedMaximumBet(state: AppState, event: ScheduledEvent, teamId: string) {
+  const rules = event.rules ?? state.settings;
+  const available = Math.max(0, effectiveAvailableBank(state, event, teamId));
+  const bankrollMaximum = Math.floor((available * 0.5) / 25_000) * 25_000;
+  return Math.min(rules.maximumBet, bankrollMaximum);
+}

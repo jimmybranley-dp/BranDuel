@@ -1,9 +1,11 @@
 // Deliberately weak credentials for a short-lived test environment.
-// Each player's lowercase ID becomes their passcode.
+// Pass the shared value through LOCAL_TEST_PASSCODE; never hard-code it here.
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { pbkdf2Sync, randomBytes } from 'node:crypto';
 
 const players = ['jason', 'ezra', 'corey', 'jimmy', 'brandon', 'andrew', 'bruce', 'ryan'];
+const passcode = process.env.LOCAL_TEST_PASSCODE;
+if (!passcode) throw new Error('Set LOCAL_TEST_PASSCODE before updating local test passcodes.');
 const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
 const files = ['.private-player-passcodes.json', '.private-player-hashes.json', '.dev.vars'];
 
@@ -14,10 +16,10 @@ for (const file of files) {
   copyFileSync(file, `${base}.before-name-passcodes-${stamp}${extension}`);
 }
 
-const passcodes = Object.fromEntries(players.map(player => [player, player]));
+const passcodes = Object.fromEntries(players.map(player => [player, passcode]));
 const hashes = Object.fromEntries(players.map(player => {
   const salt = randomBytes(16).toString('hex');
-  const hash = pbkdf2Sync(player, Buffer.from(salt, 'hex'), 100000, 32, 'sha256').toString('hex');
+  const hash = pbkdf2Sync(passcode, Buffer.from(salt, 'hex'), 100000, 32, 'sha256').toString('hex');
   return [player, `pbkdf2$100000$${salt}$${hash}`];
 }));
 
@@ -31,4 +33,4 @@ const next = /^PLAYER_PASSCODES=.*$/m.test(existing)
   : `${existing.trimEnd()}${existing.trim() ? '\n' : ''}${secretLine}\n`;
 writeFileSync('.dev.vars', next.endsWith('\n') ? next : `${next}\n`, { mode: 0o600 });
 
-console.log('Set all eight local test passcodes to their lowercase player names. Previous credential files were backed up locally.');
+console.log('Set all eight local test passcodes to the supplied shared value. Previous credential files were backed up locally.');

@@ -1,10 +1,8 @@
-/// <reference types="@cloudflare/workers-types" />
-
 import { createInitialState, normalizeState, PLAYER_IDS } from "../src/data";
 import { applyAction, parseAction, DomainError } from "../src/domain";
+import { knownActionType, logDiagnostic, semanticActionEvent } from "./observability";
 import type { AppState, PlayerId } from "../src/types";
 
-export interface Env { DB: D1Database; PLAYER_PASSCODES?: string }
 interface Snapshot { state: AppState; revision: number; serverTime: string; playerId?: PlayerId }
 interface Receipt { actor_id: string; payload_hash: string; response_json: string; response_status: number }
 const COOKIE = "branduel_session";
@@ -106,20 +104,69 @@ function receiptResponse(saved: Receipt, actorId: string, payloadHash?: string) 
   if (saved.response_status === 200) payload.serverTime = new Date().toISOString();
   return json(payload, { status: saved.response_status });
 }
+type ActionObservation = { requestId?: string; actionType?: string; actorId: PlayerId; startedAt: number; startRevision?: number; endRevision?: number; responseStatus?: number; errorCode?: string; attempt?: number };
+function observeAction(response: Response, context: ActionObservation, outcome: "accepted" | "rejected" | "recovered" | "failed") {
+  const fields = {
+    requestId: context.requestId,
+    route: "/api/actions",
+    actionType: context.actionType,
+    actorId: context.actorId,
+    startRevision: context.startRevision,
+    endRevision: context.endRevision,
+    errorCode: context.errorCode,
+    responseStatus: response.status,
+    durationMs: Date.now() - context.startedAt,
+    attempt: context.attempt,
+    outcome,
+  } as const;
+  logDiagnostic("action.request", fields);
+  if (outcome === "accepted") {
+    logDiagnostic("action.accepted", fields);
+    const semantic = context.actionType ? semanticActionEvent(context.actionType) : undefined;
+    if (semantic) logDiagnostic(semantic, fields);
+  } else if (outcome === "rejected") {
+    logDiagnostic("action.rejected", fields);
+  } else if (outcome === "recovered") {
+    logDiagnostic("receipt.recovery", fields);
+  }
+  return response;
+}
 async function handleAction(request: Request, env: Env, actorId: PlayerId) {
-  const data = await body(request);
-  if (typeof data.requestId !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(data.requestId) || typeof data.expectedPlayerId !== "string" || !PLAYER_IDS.includes(data.expectedPlayerId as PlayerId) || Object.keys(data).some(key => !["requestId", "action", "expectedPlayerId"].includes(key))) return failure("Invalid action request.", "INVALID_REQUEST", 400);
+  const startedAt = Date.now();
+  const context: ActionObservation = { actorId, startedAt, actionType: "UNKNOWN" };
+  let data: Record<string, unknown>;
+  try { data = await body(request); }
+  catch (error) {
+    if (!(error instanceof DomainError)) throw error;
+    context.errorCode = error.code;
+    return observeAction(failure(error.message, error.code, error.status), context, "rejected");
+  }
+  context.requestId = typeof data.requestId === "string" && /^[a-zA-Z0-9_-]{8,128}$/.test(data.requestId) ? data.requestId : undefined;
+  context.actionType = knownActionType((data.action as Record<string, unknown> | null)?.type);
+  if (typeof data.requestId !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(data.requestId) || typeof data.expectedPlayerId !== "string" || !PLAYER_IDS.includes(data.expectedPlayerId as PlayerId) || Object.keys(data).some(key => !["requestId", "action", "expectedPlayerId"].includes(key))) {
+    context.errorCode = "INVALID_REQUEST";
+    return observeAction(failure("Invalid action request.", "INVALID_REQUEST", 400), context, "rejected");
+  }
   // Cookies are shared between tabs. A stale tab must never submit under another player's new session.
-  if (data.expectedPlayerId !== actorId) return failure(`This browser is signed in as another player. Sign in as ${data.expectedPlayerId} to resolve this request.`, "SESSION_CHANGED", 401);
+  if (data.expectedPlayerId !== actorId) {
+    context.errorCode = "SESSION_CHANGED";
+    return observeAction(failure(`This browser is signed in as another player. Sign in as ${data.expectedPlayerId} to resolve this request.`, "SESSION_CHANGED", 401), context, "rejected");
+  }
   const requestId = data.requestId;
   const payloadHash = await digest(canonical(data.action));
   let saved = await receipt(env.DB, requestId);
-  if (saved) return receiptResponse(saved, actorId, payloadHash);
+  if (saved) return observeAction(receiptResponse(saved, actorId, payloadHash), context, "recovered");
   const legacy = await env.DB.prepare("SELECT request_id FROM action_requests WHERE request_id = ?").bind(requestId).first();
-  if (legacy) return failure("This request predates verified receipts. Jimmy must reconcile its original change before submitting a new request.", "LEGACY_REQUEST", 409);
+  if (legacy) {
+    context.errorCode = "LEGACY_REQUEST";
+    return observeAction(failure("This request predates verified receipts. Jimmy must reconcile its original change before submitting a new request.", "LEGACY_REQUEST", 409), context, "rejected");
+  }
   const action = parseAction(data.action);
+  context.actionType = action.type;
   for (let attempt = 0; attempt < 5; attempt++) {
+    context.attempt = attempt + 1;
     const current = await getState(env.DB);
+    context.startRevision = current.revision;
     let next: AppState;
     try { next = applyAction(current.state, action, actorId); }
     catch (error) {
@@ -132,12 +179,16 @@ async function handleAction(request: Request, env: Env, actorId: PlayerId) {
           env.DB.prepare("INSERT INTO action_receipts (request_id, actor_id, payload_hash, response_json, response_status, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(requestId, actorId, payloadHash, JSON.stringify({ error: error.message, code: error.code }), error.status, new Date().toISOString()),
           env.DB.prepare("DELETE FROM write_guards WHERE request_id = ?").bind(requestId),
         ]);
-        return failure(error.message, error.code, error.status);
+        context.errorCode = error.code;
+        return observeAction(failure(error.message, error.code, error.status), context, "rejected");
       } catch (writeError) {
         saved = await receipt(env.DB, requestId);
-        if (saved) return receiptResponse(saved, actorId, payloadHash);
+        if (saved) return observeAction(receiptResponse(saved, actorId, payloadHash), context, "recovered");
         const latest = await getState(env.DB);
-        if (latest.revision !== current.revision) continue;
+        if (latest.revision !== current.revision) {
+          logDiagnostic("revision.conflict", { requestId, route: "/api/actions", actionType: action.type, actorId, startRevision: current.revision, endRevision: latest.revision, responseStatus: 409, durationMs: Date.now() - startedAt, attempt: attempt + 1, outcome: "failed" });
+          continue;
+        }
         throw writeError;
       }
     }
@@ -151,47 +202,69 @@ async function handleAction(request: Request, env: Env, actorId: PlayerId) {
         env.DB.prepare("INSERT INTO action_receipts (request_id, actor_id, payload_hash, response_json, response_status, created_at) VALUES (?, ?, ?, ?, 200, ?)").bind(requestId, actorId, payloadHash, JSON.stringify(payload), payload.serverTime),
         env.DB.prepare("DELETE FROM write_guards WHERE request_id = ?").bind(requestId),
       ]);
-      return json(payload);
+      return observeAction(json(payload), context, "accepted");
     } catch (error) {
       // A lost response after commit is resolved by its durable receipt, never by deleting the request.
       saved = await receipt(env.DB, requestId);
-      if (saved) return receiptResponse(saved, actorId, payloadHash);
+      if (saved) return observeAction(receiptResponse(saved, actorId, payloadHash), context, "recovered");
       const latest = await getState(env.DB);
-      if (latest.revision !== current.revision) continue;
+      if (latest.revision !== current.revision) {
+        logDiagnostic("revision.conflict", { requestId, route: "/api/actions", actionType: action.type, actorId, startRevision: current.revision, endRevision: latest.revision, responseStatus: 409, durationMs: Date.now() - startedAt, attempt: attempt + 1, outcome: "failed" });
+        continue;
+      }
       throw error;
     }
   }
-  return failure("The house is busy. Retry this same request shortly.", "WRITE_CONFLICT", 503);
+  logDiagnostic("revision.conflict", { requestId, route: "/api/actions", actionType: context.actionType, actorId, startRevision: context.startRevision, responseStatus: 503, durationMs: Date.now() - startedAt, attempt: 5, errorCode: "WRITE_CONFLICT", outcome: "failed" });
+  context.errorCode = "WRITE_CONFLICT";
+  return observeAction(failure("The house is busy. Retry this same request shortly.", "WRITE_CONFLICT", 503), context, "rejected");
 }
 async function login(request: Request, env: Env) {
-  const data = await body(request);
-  if (typeof data.playerId !== "string" || !PLAYER_IDS.includes(data.playerId as PlayerId) || typeof data.passcode !== "string" || data.passcode.length < 1 || data.passcode.length > 128) return failure("Choose a player and enter their passcode.", "INVALID_LOGIN", 400);
+  const startedAt = Date.now();
+  const observeLogin = (response: Response, playerId?: PlayerId, outcome: "accepted" | "rejected" = "rejected", errorCode?: string) => {
+    logDiagnostic(outcome === "accepted" ? "login.success" : "login.failure", { route: "/api/login", actorId: playerId, responseStatus: response.status, errorCode, durationMs: Date.now() - startedAt, outcome });
+    return response;
+  };
+  let data: Record<string, unknown>;
+  try { data = await body(request); }
+  catch (error) {
+    if (!(error instanceof DomainError)) throw error;
+    return observeLogin(failure(error.message, error.code, error.status), undefined, "rejected", error.code);
+  }
+  const playerId = typeof data.playerId === "string" && PLAYER_IDS.includes(data.playerId as PlayerId) ? data.playerId as PlayerId : undefined;
+  if (!playerId || typeof data.passcode !== "string" || data.passcode.length < 1 || data.passcode.length > 128) return observeLogin(failure("Choose a player and enter their passcode.", "INVALID_LOGIN", 400), playerId, "rejected", "INVALID_LOGIN");
   const now = Date.now();
   const window = Math.floor(now / 900_000);
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
-  const keys = [`player:${data.playerId}:${window}`, `ip:${await digest(ip)}:${window}`];
+  const keys = [`player:${playerId}:${window}`, `ip:${await digest(ip)}:${window}`];
   const counts = await env.DB.batch(keys.map(key => env.DB.prepare("INSERT INTO login_attempts (bucket, attempts, expires_at) VALUES (?, 1, ?) ON CONFLICT(bucket) DO UPDATE SET attempts = attempts + 1 RETURNING attempts").bind(key, now + 900_000)));
   const attempts = counts.map(result => Number((result.results[0] as { attempts: number }).attempts));
-  if (attempts[0] > 20 || attempts[1] > 100) return failure("Too many sign-in attempts. Wait 15 minutes and try again.", "LOGIN_THROTTLED", 429);
+  if (attempts[0] > 20 || attempts[1] > 100) return observeLogin(failure("Too many sign-in attempts. Wait 15 minutes and try again.", "LOGIN_THROTTLED", 429), playerId, "rejected", "LOGIN_THROTTLED");
   const hashes = credentials(env);
-  if (!await verify(data.passcode, hashes[data.playerId])) return failure("That player and passcode do not match.", "INVALID_LOGIN", 401);
+  if (!await verify(data.passcode as string, hashes[playerId])) return observeLogin(failure("That player and passcode do not match.", "INVALID_LOGIN", 401), playerId, "rejected", "INVALID_LOGIN");
   const token = hex(crypto.getRandomValues(new Uint8Array(32)));
   const oldToken = tokenFrom(request);
-  const statements = [env.DB.prepare("INSERT INTO player_sessions (token_hash, player_id, credential_hash, expires_at) VALUES (?, ?, ?, ?)").bind(await digest(token), data.playerId, await digest(hashes[data.playerId]), now + SESSION_SECONDS * 1000)];
+  const statements = [env.DB.prepare("INSERT INTO player_sessions (token_hash, player_id, credential_hash, expires_at) VALUES (?, ?, ?, ?)").bind(await digest(token), playerId, await digest(hashes[playerId]), now + SESSION_SECONDS * 1000)];
   if (oldToken) statements.push(env.DB.prepare("DELETE FROM player_sessions WHERE token_hash = ?").bind(await digest(oldToken)));
   statements.push(env.DB.prepare("DELETE FROM player_sessions WHERE expires_at <= ?").bind(now), env.DB.prepare("DELETE FROM login_attempts WHERE expires_at <= ?").bind(now));
   await env.DB.batch(statements);
-  return json({ playerId: data.playerId }, { headers: { "set-cookie": cookie(request, token, SESSION_SECONDS) } });
+  return observeLogin(json({ playerId }, { headers: { "set-cookie": cookie(request, token, SESSION_SECONDS) } }), playerId, "accepted");
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const startedAt = Date.now();
     if (!url.pathname.startsWith("/api/")) return new Response(null, { status: 404 });
     try {
       if (request.method !== "GET" && (request.headers.get("origin") !== url.origin || request.headers.get("sec-fetch-site") === "cross-site")) return failure("Use this app’s own page to make changes.", "ORIGIN_REJECTED", 403);
       if (url.pathname === "/api/health" && request.method === "GET") {
-        await env.DB.prepare("SELECT COUNT(*) AS count FROM app_state").first();
+        try { await env.DB.prepare("SELECT COUNT(*) AS count FROM app_state").first(); }
+        catch {
+          const response = failure("The house health check could not reach D1.", "HEALTH_D1_FAILURE", 503);
+          logDiagnostic("health.failure", { route: "/api/health", responseStatus: response.status, durationMs: Date.now() - startedAt, errorCode: "HEALTH_D1_FAILURE", outcome: "failed" });
+          return response;
+        }
         return json({ ok: true, service: "BranDuel house" });
       }
       if (url.pathname === "/api/login" && request.method === "POST") return await login(request, env);
@@ -207,13 +280,27 @@ export default {
       if (url.pathname === "/api/actions" && request.method === "POST") return await handleAction(request, env, playerId);
       if (url.pathname.startsWith("/api/actions/") && request.method === "GET") {
         const expectedPlayerId = url.searchParams.get("expectedPlayerId");
-        if (expectedPlayerId !== null && expectedPlayerId !== playerId) return failure("This browser is signed in as another player. Sign in as the player who submitted this request to resolve it.", "SESSION_CHANGED", 401);
+        if (expectedPlayerId !== null && expectedPlayerId !== playerId) {
+          const response = failure("This browser is signed in as another player. Sign in as the player who submitted this request to resolve it.", "SESSION_CHANGED", 401);
+          logDiagnostic("receipt.recovery", { requestId: url.pathname.slice("/api/actions/".length), route: "/api/actions/:requestId", actorId: playerId, responseStatus: response.status, durationMs: Date.now() - startedAt, errorCode: "SESSION_CHANGED", outcome: "rejected" });
+          return response;
+        }
         const saved = await receipt(env.DB, url.pathname.slice("/api/actions/".length));
-        if (!saved || saved.actor_id !== playerId) return failure("No accepted request with this ID was found.", "REQUEST_UNKNOWN", 404);
-        return receiptResponse(saved, playerId);
+        if (!saved || saved.actor_id !== playerId) {
+          const response = failure("No accepted request with this ID was found.", "REQUEST_UNKNOWN", 404);
+          logDiagnostic("receipt.recovery", { requestId: url.pathname.slice("/api/actions/".length), route: "/api/actions/:requestId", actorId: playerId, responseStatus: response.status, durationMs: Date.now() - startedAt, errorCode: "REQUEST_UNKNOWN", outcome: "rejected" });
+          return response;
+        }
+        const response = receiptResponse(saved, playerId);
+        logDiagnostic("receipt.recovery", { requestId: url.pathname.slice("/api/actions/".length), route: "/api/actions/:requestId", actorId: playerId, responseStatus: response.status, durationMs: Date.now() - startedAt, outcome: "recovered" });
+        return response;
       }
       if (url.pathname === "/api/export" && request.method === "GET") {
-        if (playerId !== "jimmy") return failure("Only Jimmy can export the event.", "FORBIDDEN", 403);
+        if (playerId !== "jimmy") {
+          const response = failure("Only Jimmy can export the event.", "FORBIDDEN", 403);
+          logDiagnostic("export", { route: "/api/export", actorId: playerId, responseStatus: response.status, durationMs: Date.now() - startedAt, errorCode: "FORBIDDEN", outcome: "rejected" });
+          return response;
+        }
         await getState(env.DB);
         const [stateRows, audit] = await env.DB.batch([
           env.DB.prepare("SELECT revision, state_json FROM app_state WHERE id = 1"),
@@ -221,13 +308,16 @@ export default {
         ]);
         const row = stateRows.results[0] as unknown as { revision: number; state_json: string };
         const now = new Date().toISOString();
-        return json({ state: JSON.parse(row.state_json), revision: row.revision, serverTime: now, exportedAt: now, ledgerAudit: audit.results }, { headers: { "content-disposition": `attachment; filename="branduel-${now.slice(0, 10)}.json"` } });
+        const response = json({ state: JSON.parse(row.state_json), revision: row.revision, serverTime: now, exportedAt: now, ledgerAudit: audit.results }, { headers: { "content-disposition": `attachment; filename="branduel-${now.slice(0, 10)}.json"` } });
+        logDiagnostic("export", { route: "/api/export", actorId: playerId, startRevision: row.revision, endRevision: row.revision, responseStatus: response.status, durationMs: Date.now() - startedAt, outcome: "accepted" });
+        return response;
       }
       return failure("API route not found.", "NOT_FOUND", 404);
     } catch (error) {
       if (error instanceof DomainError) return failure(error.message, error.code, error.status);
-      console.error("BranDuel API error", error instanceof Error ? error.message : "Unknown failure");
-      return failure("The house could not confirm this request. Keep it pending and retry shortly.", "SERVICE_UNAVAILABLE", 503);
+      const response = failure("The house could not confirm this request. Keep it pending and retry shortly.", "SERVICE_UNAVAILABLE", 503);
+      logDiagnostic("unexpected.failure", { route: url.pathname, responseStatus: response.status, durationMs: Date.now() - startedAt, errorCode: "UNEXPECTED_FAILURE", outcome: "failed" });
+      return response;
     }
   },
 } satisfies ExportedHandler<Env>;

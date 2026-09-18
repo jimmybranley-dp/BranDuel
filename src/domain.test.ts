@@ -29,15 +29,15 @@ describe("Server command validation", () => {
     delete (legacy.settings.payouts as Record<string, unknown>)["billiards"];
     const normalized = normalizeState(legacy);
     expect(normalized.games["mario-kart"].name).toBe("Mario Kart");
-    expect(normalized.settings.payouts["mario-kart"]).toBe(1_500_000);
+    expect(normalized.settings.payouts["mario-kart"]).toBe(500_000);
     expect(normalized.games["nfl-blitz"].name).toBe("NFL Blitz");
-    expect(normalized.settings.payouts["nfl-blitz"]).toBe(1_750_000);
+    expect(normalized.settings.payouts["nfl-blitz"]).toBe(450_000);
     expect(normalized.games.billiards.name).toBe("Billiards");
-    expect(normalized.settings.payouts.billiards).toBe(1_250_000);
+    expect(normalized.settings.payouts.billiards).toBe(450_000);
   });
   it("rejects FFA participants from the same team", () => {
     error(() => applyAction(createInitialState(), { type: "CREATE_LIVE_EVENT", payload: { gameId: "smash", format: "free-for-all", playerIds: ["jason", "ezra"], bettingSeconds: 60 } }, "jimmy"), 400);
-    error(() => applyAction(createInitialState(), { type: "SCHEDULE_EVENT", payload: { gameId: "worms", format: "free-for-all", playerIds: ["corey", "jimmy"], scheduledAt: new Date(Date.now() + 60_000).toISOString() } }, "jimmy"), 400);
+    error(() => applyAction(createInitialState(), { type: "CREATE_LIVE_EVENT", payload: { gameId: "worms", format: "free-for-all", playerIds: ["corey", "jimmy"], bettingSeconds: 60 } }, "jimmy"), 400);
   });
   it("allows two-player FFAs for every game type", () => {
     for (const gameId of GAME_IDS) {
@@ -53,13 +53,13 @@ describe("Server command validation", () => {
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     s = applyAction(s, { type: "SETTLE_FFA_EVENT", eventId, orderedPlayerIds: [...players] }, "jimmy");
     expect(s.events[0].status).toBe("completed");
-    expect(TEAM_IDS.reduce((sum, teamId) => sum + s.balances[teamId], 0)).toBe(41_950_000);
+    expect(TEAM_IDS.reduce((sum, teamId) => sum + s.balances[teamId], 0)).toBe(1_255_000);
     const other = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jimmy");
     expect(() => applyAction(other, { type: "CREATE_LIVE_EVENT", payload: { gameId: "boomerang", format: "free-for-all", playerIds: ["jason", "corey", "brandon", "bruce", "ryan"], bettingSeconds: 60 } }, "jimmy")).not.toThrow();
   });
   it("rejects internal/unknown actions, extra fields, unsafe money and malformed participants", () => {
     for (const action of [
-      { type: "HYDRATE_REMOTE", state: {} }, { type: "SET_PLAYER", playerId: "jimmy" }, { type: "invented" },
+      { type: "HYDRATE_REMOTE", state: {} }, { type: "SET_PLAYER", playerId: "jimmy" }, { type: "SCHEDULE_EVENT", payload: {} }, { type: "invented" },
       { type: "START_GAME_NIGHT", actorId: "jimmy" },
       ...[NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER].map((amount) => ({ type: "ADJUST_BALANCE", teamId: "jason-ezra", amount, note: "test" })),
       { type: "CREATE_LIVE_EVENT", payload: { gameId: "smash", format: "teams", teamIds: ["jason-ezra", "jason-ezra"], bettingSeconds: 60 } },
@@ -89,15 +89,16 @@ describe("Server command validation", () => {
   });
   it("lets Jimmy add a custom game to the pool and use it for a round", () => {
     const initial = createInitialState();
-    const added = applyAction(initial, { type: "ADD_GAME", payload: { id: "rocket-league", name: "Rocket League", shortName: "Rocket League", payout: 2_000_000, bettable: true } }, "jimmy");
+    const added = applyAction(initial, { type: "ADD_GAME", payload: { id: "rocket-league", name: "Rocket League", shortName: "Rocket League", standardContest: "One standard match", expectedMinutes: 10, bettable: true } }, "jimmy");
     expect(added.games["rocket-league"].name).toBe("Rocket League");
-    expect(added.settings.payouts["rocket-league"]).toBe(2_000_000);
+    expect(added.settings.payouts["rocket-league"]).toBe(400_000);
     const night = applyAction(added, { type: "START_GAME_NIGHT" }, "jimmy");
     const prep = applyAction(night, { type: "SET_GAME_NIGHT_MODE", mode: "prep" }, "jimmy");
     expect(() => applyAction(prep, { type: "CREATE_PREP_EVENT", payload: { gameId: "rocket-league", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"] } }, "jimmy")).not.toThrow();
   });
-  it("lets players run the ordinary live-round flow while reserving recovery and closeout for Jimmy", () => {
-    let s = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jason");
+  it("requires Jimmy to start the night while players operate ordinary rounds", () => {
+    error(() => applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jason"), 403);
+    let s = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jimmy");
     s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "smash", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], bettingSeconds: 60 } }, "ezra");
     const eventId = s.gameNight!.activeEventId!;
     s = applyAction(s, { type: "START_MATCH", eventId }, "brandon");
@@ -125,25 +126,19 @@ describe("Market lifecycle and snapshots", () => {
     expect(s.ledger.every((entry) => entry.type === "opening-grant" && entry.actorId === "jimmy")).toBe(true);
     reconcile(s);
   });
-  it("opens up to four finite markets while scheduled drafts cannot take bets", () => {
+  it("opens four finite concurrent markets and rejects a fifth", () => {
     let s = live();
-    s = applyAction(s, { type: "SCHEDULE_EVENT", payload: { gameId: "worms", format: "teams", teamIds: ["jason-ezra", "bruce-ryan"], scheduledAt: new Date().toISOString() } }, "jimmy");
-    const draftId = s.events[0].id; const firstId = s.events[1].id;
-    expect(isBettingOpen(s.events[0])).toBe(false);
-    error(() => applyAction(s, { type: "PLACE_BET", eventId: draftId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
-    s = applyAction(s, { type: "REOPEN_EVENT", eventId: draftId }, "jimmy");
-    expect(s.gameNight?.activeEventIds).toHaveLength(2);
-    expect(isBettingOpen(s.events.find((event) => event.id === draftId)!)).toBe(true);
-    for (const gameId of ["mario-kart", "nfl-blitz"] as const) {
+    const firstId = s.events[0].id;
+    for (const gameId of ["worms", "mario-kart", "nfl-blitz"] as const) {
       s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId, format: "teams", teamIds: ["brandon-andrew", "bruce-ryan"], bettingSeconds: 60 } }, "jimmy");
     }
     expect(s.gameNight?.activeEventIds).toHaveLength(4);
     error(() => applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "billiards", format: "teams", teamIds: ["jason-ezra", "brandon-andrew"], bettingSeconds: 60 } }, "jimmy"), 409);
+    expect(isBettingOpen(s.events.find((event) => event.id === firstId)!)).toBe(true);
     s.events.find((event) => event.id === firstId)!.bettingClosesAt = new Date(Date.now() - 1000).toISOString();
-    s.events.find((event) => event.id === firstId)!.bettingReopened = true;
     error(() => applyAction(s, { type: "PLACE_BET", eventId: firstId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
     s = applyAction(s, { type: "PAUSE_BETTING", paused: true }, "jimmy");
-    error(() => applyAction(s, { type: "PLACE_BET", eventId: draftId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
+    error(() => applyAction(s, { type: "PLACE_BET", eventId: firstId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
   });
   it("keeps three concurrent markets independent through betting and settlement", () => {
     let s = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jimmy");
@@ -174,13 +169,33 @@ describe("Market lifecycle and snapshots", () => {
     s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "billiards", format: "teams", teamIds: ["corey-jimmy", "bruce-ryan"], bettingSeconds: 60 } }, "jimmy");
     expect(s.gameNight?.activeEventIds).toHaveLength(3);
   });
+  it("reopens only an expired pre-play market without duplicating or changing its frozen rules", () => {
+    let s = live();
+    const eventId = s.events[0].id;
+    const event = s.events[0];
+    const frozen = { purse: event.purse, odds: structuredClone(event.odds), rules: structuredClone(event.rules) };
+    error(() => applyAction(s, { type: "REOPEN_EVENT", eventId, bettingSeconds: 90 }, "jimmy"), 409);
+    s.events[0].bettingClosesAt = new Date(Date.now() - 1_000).toISOString();
+    error(() => applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
+    error(() => applyAction(s, { type: "REOPEN_EVENT", eventId, bettingSeconds: 90 }, "jason"), 403);
+
+    s = applyAction(s, { type: "REOPEN_EVENT", eventId, bettingSeconds: 90 }, "jimmy");
+    expect(s.gameNight?.activeEventIds).toEqual([eventId]);
+    expect(s.events[0].bettingReopened).toBe(true);
+    expect(s.events[0].purse).toBe(frozen.purse);
+    expect(s.events[0].odds).toEqual(frozen.odds);
+    expect(s.events[0].rules).toEqual(frozen.rules);
+    s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 25_000 }, "jason");
+    expect(s.bets[0].status).toBe("open");
+    s = applyAction(s, { type: "START_MATCH", eventId }, "jason");
+    error(() => applyAction(s, { type: "REOPEN_EVENT", eventId, bettingSeconds: 90 }, "jimmy"), 409);
+  });
   it("snapshots purse and ticket limits when betting opens", () => {
     let s = live(); const eventId = s.events[0].id;
-    s = applyAction(s, { type: "UPDATE_SETTINGS", settings: { ...s.settings, minimumBet: 100_000, payouts: { ...s.settings.payouts, smash: 999_999 } } }, "jimmy");
     s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 25_000 }, "jason");
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
-    expect(s.balances["jason-ezra"]).toBe(11_147_500); reconcile(s);
+    expect(s.balances["jason-ezra"]).toBe(485_000); reconcile(s);
   });
   it("keeps replaced tickets and refunds in the audit trail", () => {
     let s = live(); const eventId = s.events[0].id;
@@ -189,19 +204,18 @@ describe("Market lifecycle and snapshots", () => {
     expect(s.bets.map((b) => b.status)).toEqual(["open", "replaced"]);
     expect(s.bets[0].placedBy).toBe("ezra");
     s = applyAction(s, { type: "CANCEL_EVENT", eventId }, "jimmy");
-    expect(s.balances["jason-ezra"]).toBe(10_000_000); reconcile(s);
+    expect(s.balances["jason-ezra"]).toBe(200_000); reconcile(s);
   });
-  it("never allows Mario Party betting and refuses draft closeout", () => {
+  it("never allows Mario Party betting and refuses unfinished closeout", () => {
     let s = applyAction(createInitialState(), { type: "START_GAME_NIGHT" }, "jimmy");
-    s = applyAction(s, { type: "SCHEDULE_EVENT", payload: { gameId: "mario-party", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], scheduledAt: new Date().toISOString() } }, "jimmy");
+    s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "mario-party", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], bettingSeconds: 60 } }, "jimmy");
     const eventId = s.events[0].id;
     error(() => applyAction(s, { type: "END_GAME_NIGHT" }, "jimmy"), 409);
-    s = applyAction(s, { type: "REOPEN_EVENT", eventId }, "jimmy");
     error(() => applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 25_000 }, "jason"), 409);
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     error(() => applyAction(s, { type: "REOPEN_EVENT", eventId }, "jimmy"), 409);
     s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
-    expect(s.balances["jason-ezra"]).toBe(12_250_000); reconcile(s);
+    expect(s.balances["jason-ezra"]).toBe(875_000); reconcile(s);
   });
 });
 
@@ -230,7 +244,7 @@ describe("Commissioner corrections and finale", () => {
     expect(s.ledger).toHaveLength(startingLedger);
     expect(s.bets).toHaveLength(0);
     expect(getGameRecords(s, "smash").find((record) => record.playerId === "jason")?.wins).toBe(1);
-    expect(getGameRecords(s, "smash").find((record) => record.playerId === "jason")?.rating).toBeGreaterThan(1000);
+    expect(getGameRecords(s, "smash").find((record) => record.playerId === "jason")?.rating).toBe(1014);
   });
 
   it("corrects and voids prep results without requiring settlement reversals", () => {
@@ -247,35 +261,35 @@ describe("Commissioner corrections and finale", () => {
 
   it("reverses and reapplies results repeatedly without changing accepted odds", () => {
     let s = live(); const eventId = s.events[0].id;
-    s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 500_000 }, "bruce");
+    s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 100_000 }, "bruce");
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
     s = applyAction(s, { type: "RUN_IT_BACK", eventId, bettingSeconds: 60 }, "jimmy");
     const laterOdds = structuredClone(s.events[0].odds);
     s = applyAction(s, { type: "CORRECT_RESULT", eventId, result: { winningTeamId: "corey-jimmy" }, reason: "Wrong side reported" }, "jimmy");
-    expect(s.balances["jason-ezra"]).toBe(10_375_000);
-    expect(s.balances["corey-jimmy"]).toBe(11_125_000);
-    expect(s.balances["bruce-ryan"]).toBe(9_500_000);
+    expect(s.balances["jason-ezra"]).toBe(287_500);
+    expect(s.balances["corey-jimmy"]).toBe(462_500);
+    expect(s.balances["bruce-ryan"]).toBe(100_000);
     expect(s.events[0].odds).toEqual(laterOdds);
     expect(getGameRecords(s, "smash").find((p) => p.playerId === "corey")?.wins).toBe(1);
     reconcile(s);
     s = applyAction(s, { type: "CORRECT_RESULT", eventId, result: { winningTeamId: "jason-ezra" }, reason: "Video confirmed original" }, "jimmy");
     reconcile(s);
     s = applyAction(s, { type: "CANCEL_EVENT", eventId, reason: "Disputed round void" }, "jimmy");
-    TEAM_IDS.forEach((team) => expect(s.balances[team]).toBe(10_000_000));
+    TEAM_IDS.forEach((team) => expect(s.balances[team]).toBe(200_000));
     expect(s.bets[0].status).toBe("refunded");
     expect(getGameRecords(s, "smash").every((p) => p.wins === 0 && p.rating === 1000)).toBe(true); reconcile(s);
   });
   it("conserves odd FFA purses and fixes all placement payouts", () => {
-    let s = applyAction(createInitialState(), { type: "UPDATE_SETTINGS", settings: { ...createInitialState().settings, payouts: { ...createInitialState().settings.payouts, boomerang: 101 } } }, "jimmy");
+    let s = createInitialState();
     s = applyAction(s, { type: "START_GAME_NIGHT" }, "jimmy");
     s = applyAction(s, { type: "CREATE_LIVE_EVENT", payload: { gameId: "boomerang", format: "free-for-all", playerIds: ["jason", "corey", "andrew"], bettingSeconds: 60 } }, "jimmy");
     const eventId = s.events[0].id;
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     s = applyAction(s, { type: "SETTLE_FFA_EVENT", eventId, orderedPlayerIds: ["jason", "corey", "andrew"] }, "jason");
-    expect(TEAM_IDS.reduce((sum, t) => sum + s.balances[t], 0)).toBe(40_000_081);
+    expect(TEAM_IDS.reduce((sum, t) => sum + s.balances[t], 0)).toBe(1_120_000);
     s = applyAction(s, { type: "CORRECT_RESULT", eventId, result: { orderedPlayerIds: ["andrew", "corey", "jason"] }, reason: "Placements transposed" }, "jimmy");
-    expect(s.balances["brandon-andrew"]).toBe(10_000_053); reconcile(s);
+    expect(s.balances["brandon-andrew"]).toBe(408_000); reconcile(s);
   });
   it("blocks unresolved closeout then freezes and archives the final snapshot", () => {
     let s = live(); const eventId = s.events[0].id;
@@ -295,12 +309,12 @@ describe("Commissioner corrections and finale", () => {
   });
   it("refuses unsafe legacy reversals and permits debt without allowing unaffordable bets", () => {
     let s = live(); const eventId = s.events[0].id;
-    s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 500_000 }, "bruce");
+    s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 100_000 }, "bruce");
     s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
     s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
     s = applyAction(s, { type: "ADJUST_BALANCE", teamId: "bruce-ryan", amount: -10_000_000, note: "Bank already spent" }, "jimmy");
     s = applyAction(s, { type: "CORRECT_RESULT", eventId, result: { winningTeamId: "corey-jimmy" }, reason: "Wrong winner" }, "jimmy");
-    expect(s.balances["bruce-ryan"]).toBe(-500_000); reconcile(s);
+    expect(s.balances["bruce-ryan"]).toBe(-9_900_000); reconcile(s);
     s = applyAction(s, { type: "RUN_IT_BACK", eventId, bettingSeconds: 60 }, "jimmy");
     error(() => applyAction(s, { type: "PLACE_BET", eventId: s.events[0].id, selectionId: "jason-ezra", stake: 25_000 }, "bruce"), 409);
     s.ledger.forEach((entry) => { delete entry.eventId; });
@@ -324,6 +338,6 @@ describe("Commissioner corrections and finale", () => {
     s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
     s = applyAction(s, { type: "CORRECT_RESULT", eventId, result: { winningTeamId: "corey-jimmy" }, reason: "Correct records only" }, "jimmy");
     s = applyAction(s, { type: "CANCEL_EVENT", eventId, reason: "Void practice result" }, "jimmy");
-    TEAM_IDS.forEach((team) => expect(s.balances[team]).toBe(10_000_000)); reconcile(s);
+    TEAM_IDS.forEach((team) => expect(s.balances[team]).toBe(200_000)); reconcile(s);
   });
 });

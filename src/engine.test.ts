@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { createInitialState, sampleEvents } from "./data";
+import { createInitialState } from "./data";
 import { canPlayerBet, formatAmericanOdds, generateOdds, getBetRestrictionReason, getFreeForAllShares, isBettingOpen } from "./engine";
+import type { ScheduledEvent } from "./types";
+
+function sampleTeamEvent(): ScheduledEvent {
+  return { id: "team-event", gameId: "smash", format: "teams", teamIds: ["jason-ezra", "corey-jimmy"], odds: { "jason-ezra": 1.9, "corey-jimmy": 1.9 }, status: "betting", scheduledAt: "2026-09-12T00:00:00.000Z", createdAt: "2026-09-12T00:00:00.000Z", createdBy: "jimmy" };
+}
+
+function sampleFfaEvent(): ScheduledEvent {
+  return { id: "ffa-event", gameId: "boomerang", format: "free-for-all", playerIds: ["ezra", "corey", "andrew", "ryan"], odds: { ezra: 3.8, corey: 3.8, andrew: 3.8, ryan: 3.8 }, status: "betting", scheduledAt: "2026-09-12T00:00:00.000Z", createdAt: "2026-09-12T00:00:00.000Z", createdBy: "jimmy" };
+}
 
 describe("BranDuel rules", () => {
   it("uses the agreed free-for-all payout shares", () => {
@@ -20,21 +29,21 @@ describe("BranDuel rules", () => {
 
   it("only lets a participant back their own side", () => {
     const state = createInitialState();
-    const event = sampleEvents()[0];
+    const event = sampleTeamEvent();
     expect(canPlayerBet(state, event, "corey-jimmy", "jimmy")).toBe(true);
     expect(canPlayerBet(state, event, "jason-ezra", "jimmy")).toBe(false);
   });
 
   it("blocks a player when only their teammate is in a free-for-all", () => {
     const state = createInitialState();
-    const event = sampleEvents()[1];
+    const event = sampleFfaEvent();
     expect(canPlayerBet(state, event, "andrew", "brandon")).toBe(false);
     expect(canPlayerBet(state, event, "corey", "jimmy")).toBe(false);
     expect(getBetRestrictionReason(state, event, "jimmy")).toBe("Corey is playing, so your team cannot bet on this match.");
   });
 
   it("closes betting at the scheduled start", () => {
-    const event = sampleEvents()[0];
+    const event = sampleTeamEvent();
     event.status = "betting";
     event.bettingClosesAt = event.scheduledAt;
     expect(isBettingOpen(event, new Date(event.scheduledAt).getTime() - 1)).toBe(true);

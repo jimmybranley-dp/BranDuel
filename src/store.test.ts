@@ -22,7 +22,7 @@ describe("Game Night session", () => {
     state = reducer(state, { type: "PLACE_BET", eventId: eventId!, selectionId: "corey-jimmy", stake: 25_000 });
     state = reducer(state, { type: "PLACE_BET", eventId: eventId!, selectionId: "corey-jimmy", stake: 50_000 });
     expect(state.bets.filter((bet) => bet.eventId === eventId && bet.status === "open")).toHaveLength(1);
-    expect(state.balances["corey-jimmy"]).toBe(9_950_000);
+    expect(state.balances["corey-jimmy"]).toBe(150_000);
 
     state = reducer(state, { type: "START_MATCH", eventId: eventId! });
     expect(state.events.find((event) => event.id === eventId)?.status).toBe("in-progress");
@@ -30,7 +30,7 @@ describe("Game Night session", () => {
     state = reducer(state, { type: "SETTLE_TEAM_EVENT", eventId: eventId!, winningTeamId: "corey-jimmy" });
     expect(state.gameNight?.activeEventId).toBeUndefined();
     expect(state.gameNight?.lastSettledEventId).toBe(eventId);
-    expect(state.balances["corey-jimmy"]).toBe(11_170_000);
+    expect(state.balances["corey-jimmy"]).toBe(507_500);
   });
 
   it("can run the same matchup again with refreshed odds", () => {

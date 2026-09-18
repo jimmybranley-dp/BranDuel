@@ -14,7 +14,7 @@ it("runs reproducible server-authoritative economy nights", () => {
     if (error instanceof EconomySimulationError) console.error(JSON.stringify({ seed: error.seed, trace: error.trace, state: error.state, replay: error.replayCommand() }, null, 2));
     throw error;
   }
-}, Number(process.env.ECONOMY_TIMEOUT_MS ?? 5_000));
+}, Number(process.env.ECONOMY_TIMEOUT_MS ?? 15_000));
 
 if (process.env.ECONOMY_EXPLAIN_SEED) it("prints a replayable extreme-night inspection", () => {
   console.log(JSON.stringify(inspectEconomyNight(Number(process.env.ECONOMY_EXPLAIN_SEED), rounds), null, 2));

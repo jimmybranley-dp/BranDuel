@@ -15,14 +15,13 @@ class MemoryD1 {
     this.sqlite.exec(readFileSync(new URL('../migrations/0002_authoritative_actions.sql', import.meta.url), 'utf8'));
   }
   prepare(sql) {
-    const db = this;
     let values = [];
-    function execute() {
-      if (db.failPattern && sql.includes(db.failPattern)) throw new Error('Injected database write failure');
-      const statement = db.sqlite.prepare(sql);
+    const execute = () => {
+      if (this.failPattern && sql.includes(this.failPattern)) throw new Error('Injected database write failure');
+      const statement = this.sqlite.prepare(sql);
       if (statement.columns().length) {
         const results = statement.all(...values);
-        return { success: true, results, meta: { changes: Number(db.sqlite.prepare('SELECT changes() AS n').get().n) } };
+        return { success: true, results, meta: { changes: Number(this.sqlite.prepare('SELECT changes() AS n').get().n) } };
       }
       const result = statement.run(...values);
       return { success: true, results: [], meta: { changes: Number(result.changes) } };
@@ -95,7 +94,7 @@ describe('authoritative Worker authentication', () => {
     expect((await call('/api/actions', { requestId: crypto.randomUUID(), actorId: 'jimmy', action: adjust() }, 'jason')).status).toBe(400);
     expect((await action(adjust(), undefined, 'jason')).status).toBe(403);
     expect((await action({ type: 'HYDRATE_REMOTE', state: { balances: { 'corey-jimmy': 123 } } }, undefined, 'jason')).status).toBe(400);
-    expect(db.state().balances['corey-jimmy']).toBe(10_000_000);
+    expect(db.state().balances['corey-jimmy']).toBe(200_000);
   });
   it('uses secure HttpOnly cookies, expires sessions, and revokes logout', async () => {
     const login = await signIn();
@@ -123,7 +122,7 @@ describe('authoritative Worker authentication', () => {
     const result = await call('/api/actions', { action: adjust(), requestId, expectedPlayerId: 'jason' }, 'jimmy');
     expect(result.status).toBe(401);
     expect(result.body.code).toBe('SESSION_CHANGED');
-    expect(db.state().balances['corey-jimmy']).toBe(10_000_000);
+    expect(db.state().balances['corey-jimmy']).toBe(200_000);
     expect(db.row('SELECT COUNT(*) AS n FROM action_receipts').n).toBe(0);
     expect((await call('/api/state')).body.playerId).toBe('jimmy');
     expect((await action(adjust())).body.playerId).toBe('jimmy');
@@ -159,14 +158,14 @@ describe('atomic state, audit, and receipt commit', () => {
     const requestId = crypto.randomUUID();
     db.failPattern = pattern;
     expect((await action(adjust(), requestId)).status).toBe(503);
-    expect(db.state().balances['corey-jimmy']).toBe(10_000_000);
+    expect(db.state().balances['corey-jimmy']).toBe(200_000);
     expect(db.row('SELECT revision FROM app_state').revision).toBe(1);
     expect(db.row('SELECT COUNT(*) AS n FROM ledger_audit').n).toBe(4);
     expect((await call(`/api/actions/${requestId}`)).status).toBe(404);
     db.failPattern = null;
     expect((await action(adjust(), requestId)).status).toBe(200);
     expect((await action(adjust(), requestId)).status).toBe(200);
-    expect(db.state().balances['corey-jimmy']).toBe(10_100_000);
+    expect(db.state().balances['corey-jimmy']).toBe(300_000);
     expect(db.row("SELECT SUM(amount) AS n FROM ledger_audit WHERE entry_type = 'admin-adjustment'").n).toBe(100_000);
   });
   it('returns original receipt after a commit response is lost and after later writes', async () => {
@@ -179,7 +178,7 @@ describe('atomic state, audit, and receipt commit', () => {
     expect(replay.body.state).toEqual(result.body.state);
     expect(replay.body.revision).toEqual(result.body.revision);
     expect((await call(`/api/actions/${requestId}`)).body.state).toEqual(result.body.state);
-    expect(db.state().balances['corey-jimmy']).toBe(10_300_000);
+    expect(db.state().balances['corey-jimmy']).toBe(500_000);
   });
   it('refreshes server time on late receipt recovery while preserving accepted state and revision', async () => {
     const requestId = crypto.randomUUID();
@@ -211,13 +210,13 @@ describe('atomic state, audit, and receipt commit', () => {
     const requestId = crypto.randomUUID();
     db.sqlite.prepare('INSERT INTO action_requests VALUES (?, ?, ?, ?, ?)').run(requestId, 'jimmy', 'ADJUST_BALANCE', null, '2026-09-01T00:00:00Z');
     expect((await action(adjust(), requestId)).body.code).toBe('LEGACY_REQUEST');
-    expect(db.state().balances['corey-jimmy']).toBe(10_000_000);
+    expect(db.state().balances['corey-jimmy']).toBe(200_000);
   });
   it('rebases concurrent actions without losing either ledger entry', async () => {
     db.coordinateReads();
     const results = await Promise.all([action(adjust(100_000)), action(adjust(200_000))]);
     expect(results.map(result => result.status)).toEqual([200, 200]);
-    expect(db.state().balances['corey-jimmy']).toBe(10_300_000);
+    expect(db.state().balances['corey-jimmy']).toBe(500_000);
     expect(db.row('SELECT revision FROM app_state').revision).toBe(3);
     expect(db.row('SELECT COUNT(*) AS n FROM action_receipts').n).toBe(2);
     expect(db.row('SELECT COUNT(*) AS n FROM write_guards').n).toBe(0);
@@ -229,7 +228,7 @@ describe('atomic state, audit, and receipt commit', () => {
     expect(results.map(result => result.status)).toEqual([200, 200]);
     expect(results[0].body.state).toEqual(results[1].body.state);
     expect(results[0].body.revision).toBe(results[1].body.revision);
-    expect(db.state().balances['corey-jimmy']).toBe(10_100_000);
+    expect(db.state().balances['corey-jimmy']).toBe(300_000);
   });
   it('preserves terminal rejection so the same key never becomes accepted later', async () => {
     const requestId = crypto.randomUUID();

@@ -3,6 +3,7 @@ export type GameId = string;
 export type PlayerId = "jason" | "ezra" | "corey" | "jimmy" | "brandon" | "andrew" | "bruce" | "ryan";
 export type TeamId = "jason-ezra" | "corey-jimmy" | "brandon-andrew" | "bruce-ryan";
 
+/** `scheduled` is retained only so legacy snapshots can be safely voided; new commands never create it. */
 export type EventStatus = "scheduled" | "betting" | "in-progress" | "completed" | "cancelled";
 export type EventFormat = "teams" | "free-for-all";
 export type EventType = "FFA" | "HEAD_TO_HEAD";
@@ -25,6 +26,15 @@ export interface Game {
   id: GameId;
   name: string;
   shortName: string;
+  /** Standard contest wording shown to players and commissioners. */
+  standardContest?: string;
+  /** Expected wall-clock duration for newly configured contests. */
+  expectedMinutes?: number;
+  /** Duration-calibrated purse before an optional commissioner override. */
+  basePurse?: number;
+  /** Historical custom games without duration metadata need explicit calibration. */
+  needsDurationCalibration?: boolean;
+  purseOverride?: { amount: number; reason: string };
   payout: number;
   bettable: boolean;
 }
@@ -75,6 +85,7 @@ export interface ScheduledEvent {
   eventType?: EventType;
   housePurse?: number;
   format: EventFormat;
+  /** Historical event timestamp used for ordering; calendar scheduling is not supported. */
   scheduledAt: string;
   status: EventStatus;
   mode?: EventMode;
@@ -88,6 +99,8 @@ export interface ScheduledEvent {
   result?: MatchResult;
   createdBy: PlayerId;
   createdAt: string;
+  /** Set by the server when START_MATCH is accepted. */
+  startedAt?: string;
   bettingReopened?: boolean;
   bettingClosesAt?: string;
   gameNightId?: string;
@@ -123,6 +136,10 @@ export interface LedgerEntry {
   betId?: string;
   actorId?: PlayerId;
   reversesEntryId?: string;
+  seasonId?: string;
+  priorBalance?: number;
+  newBalance?: number;
+  reason?: string;
 }
 
 export interface BankAdjustment {
@@ -141,6 +158,16 @@ export interface AppSettings {
   maximumBet: number;
   houseEdge: number;
   payouts: Record<GameId, number>;
+}
+
+export interface EconomySeason {
+  id: string;
+  startedAt: string;
+  actorId: PlayerId;
+  reason: string;
+  priorBalances: Record<TeamId, number>;
+  newBalances: Record<TeamId, number>;
+  ledgerEntryIds: string[];
 }
 
 export interface GameNight {
@@ -178,5 +205,6 @@ export interface AppState {
   settings: AppSettings;
   gameNight?: GameNight;
   gameNightArchives?: GameNight[];
+  economySeasons?: EconomySeason[];
   bettingPaused?: boolean;
 }

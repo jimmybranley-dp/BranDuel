@@ -21,5 +21,5 @@ const previous = existsSync('.dev.vars') ? readFileSync('.dev.vars', 'utf8').tri
 writeFileSync('.dev.vars', previous + `PLAYER_PASSCODES='${JSON.stringify(hashes)}'\n`, { mode: 0o600 });
 writeFileSync('.private-player-hashes.json', JSON.stringify(hashes) + '\n', { mode: 0o600, flag: 'wx' });
 console.log('Generated .dev.vars, .private-player-passcodes.json and .private-player-hashes.json. Share each player only their own passcode.');
-console.log('For a selected remote environment, pipe .private-player-hashes.json into wrangler secret put PLAYER_PASSCODES --env <environment>.');
+console.log('For a remote environment, use the named secret:put:staging or secret:put:production command; it identifies the target and prompts for the secret without printing it.');
 console.log('Rotating a player hash invalidates that player’s existing sessions. Keep all three files private and out of version control.');

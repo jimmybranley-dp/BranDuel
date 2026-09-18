@@ -1,7 +1,7 @@
 import { createInitialState, GAME_IDS, PLAYER_IDS, TEAM_IDS } from "./data";
 import { applyAction, type Action } from "./domain";
-import { canPlayerBet, selectionWon } from "./engine";
-import type { AppState, Bet, PlayerId, ScheduledEvent, TeamId } from "./types";
+import { allowedMaximumBet, canPlayerBet, selectionWon } from "./engine";
+import type { AppState, PlayerId, ScheduledEvent, TeamId } from "./types";
 
 export type EconomyProfile = "conservative" | "max-bettor" | "loss-chaser" | "self-backer" | "random-legal" | "coordinated";
 export interface SimulationOptions { seed: number; nights?: number; rounds?: number; }
@@ -117,7 +117,8 @@ function runNight(seed: number, rounds: number, report: SimulationReport) {
       const legal = Object.keys(event.odds).filter(selection => canPlayerBet(state, event, selection, actor));
       if (!legal.length || !state.games[gameId].bettable) continue;
       const priorLost = state.bets.some(bet => bet.teamId === teamId && bet.status === "lost");
-      const max = event.rules!.maximumBet;
+      const max = allowedMaximumBet(state, event, teamId);
+      if (max < event.rules!.minimumBet) continue;
       const stake = profile === "max-bettor" ? max : profile === "loss-chaser" && priorLost ? max : profile === "conservative" ? event.rules!.minimumBet : random.chance(.5) ? max : event.rules!.minimumBet;
       const selection = profile === "self-backer" ? legal.find(id => id === teamId || id === actor) ?? random.pick(legal) : random.pick(legal);
       if (state.balances[teamId] >= stake) { accept(actor, { type: "PLACE_BET", eventId: event.id, selectionId: selection, stake }); betProfiles.set(state.bets[0].id, profile); }
@@ -126,8 +127,11 @@ function runNight(seed: number, rounds: number, report: SimulationReport) {
         const teammate = teamPlayers(state, teamId).find(id => id !== actor)!;
         const teammateLegal = Object.keys(event.odds).filter(selection => canPlayerBet(state, event, selection, teammate));
         if (!teammateLegal.length) continue;
-        const replacement = openTicket.stake === max ? event.rules!.minimumBet : max;
+        const replacementMaximum = allowedMaximumBet(state, event, teamId);
+        if (replacementMaximum < event.rules!.minimumBet) continue;
+        const replacement = openTicket.stake === replacementMaximum ? event.rules!.minimumBet : replacementMaximum;
         const replacementSelection = teammateLegal.find(id => id !== openTicket.selectionId) ?? teammateLegal[0];
+        if (replacement === openTicket.stake && replacementSelection === openTicket.selectionId) continue;
         accept(teammate, { type: "PLACE_BET", eventId: event.id, selectionId: replacementSelection, stake: replacement }); betProfiles.set(state.bets[0].id, profile);
       }
     }

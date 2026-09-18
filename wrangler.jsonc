@@ -23,6 +23,20 @@
     "staging": {
       "name": "branduel-staging",
       "workers_dev": true,
+      "routes": [
+        {
+          "pattern": "branduel2.jimmybranley.com",
+          "custom_domain": true
+        }
+      ],
+      "observability": {
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": false,
+          "persist": true
+        }
+      },
       "secrets": {
         "required": ["PLAYER_PASSCODES"]
       },
@@ -30,7 +44,7 @@
         {
           "binding": "DB",
           "database_name": "branduel-staging",
-          "database_id": "fe6ed6e1-87fa-4f0d-a092-78defae795c8",
+          "database_id": "92d0a87d-d641-472f-ad1c-07210e38096a",
           "migrations_dir": "migrations"
         }
       ]
@@ -38,6 +52,20 @@
     "production": {
       "name": "branduel-production",
       "workers_dev": true,
+      "routes": [
+        {
+          "pattern": "branduel.jimmybranley.com",
+          "custom_domain": true
+        }
+      ],
+      "observability": {
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": false,
+          "persist": true
+        }
+      },
       "secrets": {
         "required": ["PLAYER_PASSCODES"]
       },
