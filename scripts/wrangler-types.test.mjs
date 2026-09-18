@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { equal, notEqual } from "node:assert/strict";
+import { doesNotMatch, equal, notEqual } from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,10 @@ test("generated binding freshness fails after a controlled generated-file change
   const configPath = join(root, "wrangler.jsonc");
   try {
     equal(await runWranglerTypes(["generate", "--output", output]), 0);
+    doesNotMatch(
+      await readFile(output, "utf8"),
+      /\tinterface GlobalProps \{\r?\n\t\tmainModule:/,
+    );
     equal(await runWranglerTypes(["check", "--output", output]), 0);
     const config = JSON.parse(
       await readFile(resolve(rootDir, "wrangler.jsonc"), "utf8"),
