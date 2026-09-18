@@ -4,7 +4,7 @@ import { TEAM_IDS } from "../data";
 import { formatAmericanOdds, formatMoney } from "../engine";
 import { useStore } from "../store";
 import type { PlayerId, TeamId } from "../types";
-import { AdminPanel } from "./commissioner";
+import { AdminPanel, EconomySeasonPanel } from "./commissioner";
 import { EmptyState, formatDate } from "./shared";
 
 function BetHistory() {
@@ -46,8 +46,8 @@ export function BankView({ notify }: { notify: (message: string) => void }) {
       {tab === "activity" ? (
         entries.length ? <div className="ledger">{entries.map((entry) => <div key={entry.id}><span className={`ledger-icon ${entry.amount >= 0 ? "positive" : "negative"}`}>{entry.amount >= 0 ? <Plus size={18} /> : <Receipt size={18} />}</span><div><strong>{entry.description}</strong><small>{formatDate(entry.createdAt)}</small></div><strong className={entry.amount >= 0 ? "positive" : "negative"}>{entry.amount >= 0 ? "+" : ""}{formatMoney(entry.amount)}</strong></div>)}</div> : <EmptyState icon={Bank} title="No activity yet" body="Game payouts, wagers, refunds, and adjustments will appear here." />
       ) : <BetHistory />}
+      {state.currentPlayerId === "jimmy" && state.gameNight?.status === "ended" && <EconomySeasonPanel notify={notify} />}
       {state.currentPlayerId === "jimmy" && state.gameNight?.status !== "ended" && <AdminPanel notify={notify} />}
     </div>
   );
 }
-

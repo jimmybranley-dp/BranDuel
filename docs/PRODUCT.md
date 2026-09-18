@@ -7,7 +7,7 @@ This document separates behavior verified by the current code/tests from decisio
 ### Event and economy
 
 - There are four fixed two-player teams: Jason/Ezra, Corey/Jimmy, Brandon/Andrew, and Bruce/Ryan.
-- A fresh economy grants each team $200,000. Opening grants are recorded in the ledger. Existing balances carry forward until Jimmy explicitly starts a new economy season.
+- A fresh economy grants each team $200,000. Opening grants are recorded in the ledger. Existing balances carry forward until Jimmy explicitly resets the league for a new season.
 - House purses use `round-to-nearest-$25,000($400,000 × sqrt(expected minutes / 10))`, clamped to $150,000–$1,000,000. Exact half steps round upward. The built-in purses are:
 
   | Game          |    Purse | Betting |
@@ -66,8 +66,8 @@ Prep mode, if intentionally enabled by Jimmy before live play, runs non-betting 
 - A team has no more than one open ticket per market, and ticket replacement is auditable.
 - Settlement and correction preserve money conservation and a reconstructable ledger.
 - Results cannot be settled before play, and final closeout cannot leave unresolved work.
-- Archived nights are frozen; new nights carry balances forward rather than silently resetting the league.
-- Jimmy may start a new economy season only after all prior work is closed. It preserves archives, results, ratings, wagers, and ledger history while recording explicit per-team adjustments to $200,000.
+- Archived nights are frozen; ordinary new nights carry balances forward rather than silently resetting the league.
+- Jimmy may explicitly reset the league for a new season only after all prior work is closed. This clears active game results, derived ratings, wagers, and closeout archives, then creates fresh $200,000 opening grants. Immutable server audit and receipt records remain available for accountability.
 
 ## Unresolved product decisions
 

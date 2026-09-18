@@ -10,7 +10,7 @@ Game metadata owns expected minutes and the standard contest description. A comm
 
 Observed duration is `startedAt → settledAt`. At least three completed, non-voided samples produce a commissioner-visible median and suggested future purse; suggestions never mutate a current market. Historical events without `startedAt` are ignored.
 
-Existing balances are not silently rewritten. Jimmy must explicitly start a new economy season after all prior work is closed. That action preserves archives and records one per-team ledger adjustment with the actor, reason, prior/new balances, season ID, request receipt, and D1 audit context.
+Existing balances are not silently rewritten. Jimmy must explicitly reset the league for a new season after all prior work is closed. That action clears active game/rating history and closeout archives, starts fresh $200,000 opening grants, and records the actor, reason, season ID, request receipt, and D1 audit context. Immutable server audit rows are retained even though the active league view starts clean.
 
 ## Consequences
 

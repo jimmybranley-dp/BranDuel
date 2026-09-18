@@ -10,6 +10,7 @@ type TeamNames = Record<TeamId, string>;
 export const MAX_ACTIVE_EVENTS = 4;
 export type Action =
   | { type: "START_GAME_NIGHT" | "END_GAME_NIGHT" | "DISMISS_RECAP" | "RESET" }
+  | { type: "RESET_SEASON"; seasonId?: string; reason: string }
   | { type: "START_ECONOMY_SEASON"; seasonId?: string; reason: string }
   | { type: "SET_GAME_NIGHT_MODE"; mode: GameNightMode }
   | { type: "CREATE_LIVE_EVENT"; payload: Matchup & { bettingSeconds: number } }
@@ -117,6 +118,7 @@ export function parseAction(value: unknown, availableGameIds: string[] = GAME_ID
   const base = object(value, ["type", "payload", "eventId", "bettingSeconds", "selectionId", "stake", "winningTeamId", "orderedPlayerIds", "result", "reason", "paused", "settings", "teamNames", "teamId", "amount", "note", "mode", "seasonId"], ["type"]);
   switch (base.type) {
     case "START_GAME_NIGHT": case "END_GAME_NIGHT": case "DISMISS_RECAP": case "RESET": object(base, ["type"]); break;
+    case "RESET_SEASON": object(base, ["type", "reason", "seasonId"], ["type", "reason"]); text(base.reason, "Season reset reason"); if (base.seasonId !== undefined) text(base.seasonId, "Season ID", 120); break;
     case "START_ECONOMY_SEASON": object(base, ["type", "reason", "seasonId"], ["type", "reason"]); text(base.reason, "Season reason"); if (base.seasonId !== undefined) text(base.seasonId, "Season ID", 120); break;
     case "SET_GAME_NIGHT_MODE": object(base, ["type", "mode"]); member(base.mode, ["prep", "live"], "game night mode"); break;
     case "CREATE_LIVE_EVENT": case "CREATE_PREP_EVENT": {
@@ -243,14 +245,31 @@ function openMarket(state: AppState, event: ScheduledEvent, seconds: number, reo
 export function applyAction(current: AppState, unchecked: Action, actorId: PlayerId): AppState {
   const action = parseAction(unchecked, Object.keys(current.games));
   requireThat(PLAYER_IDS.includes(actorId), "Sign in to continue.", 401, "UNAUTHENTICATED");
-  const commissionerActions = ["START_GAME_NIGHT", "END_GAME_NIGHT", "START_ECONOMY_SEASON", "SET_GAME_NIGHT_MODE", "REOPEN_EVENT", "CORRECT_RESULT", "CANCEL_EVENT", "PAUSE_BETTING", "UPDATE_SETTINGS", "UPDATE_TEAM_NAMES", "ADD_GAME", "UPDATE_GAME", "ADJUST_BALANCE", "RESET"];
+  const commissionerActions = ["START_GAME_NIGHT", "END_GAME_NIGHT", "START_ECONOMY_SEASON", "RESET_SEASON", "SET_GAME_NIGHT_MODE", "REOPEN_EVENT", "CORRECT_RESULT", "CANCEL_EVENT", "PAUSE_BETTING", "UPDATE_SETTINGS", "UPDATE_TEAM_NAMES", "ADD_GAME", "UPDATE_GAME", "ADJUST_BALANCE", "RESET"];
   if (commissionerActions.includes(action.type)) requireThat(actorId === "jimmy", "Only Jimmy can perform this action.", 403, "FORBIDDEN");
-  requireThat(current.gameNight?.status !== "ended" || action.type === "START_GAME_NIGHT" || action.type === "START_ECONOMY_SEASON", "This night is closed and its results are frozen.");
+  requireThat(current.gameNight?.status !== "ended" || action.type === "START_GAME_NIGHT" || action.type === "START_ECONOMY_SEASON" || action.type === "RESET_SEASON", "This night is closed and its results are frozen.");
   const state = structuredClone(current);
   switch (action.type) {
     case "RESET":
       requireThat(!state.gameNight && state.events.length === 0 && state.bets.length === 0 && state.ledger.every((e) => e.type === "opening-grant"), "Reset is disabled after activity begins.");
       return createInitialState();
+    case "RESET_SEASON": {
+      requireThat(!state.gameNight || state.gameNight.status === "ended", "Close the active game night before resetting the league for a new season.");
+      requireThat(state.events.every((event) => ["completed", "cancelled"].includes(event.status)), "Close or void every prior round before resetting the season.");
+      requireThat(state.bets.every((bet) => bet.status !== "open"), "Resolve every prior ticket before resetting the season.");
+      const seasonId = action.seasonId?.trim() || id("season");
+      const startedAt = new Date().toISOString();
+      const fresh = createInitialState();
+      fresh.currentPlayerId = actorId;
+      fresh.teams = structuredClone(state.teams);
+      fresh.players = structuredClone(state.players);
+      fresh.games = structuredClone(state.games);
+      fresh.settings = { ...structuredClone(state.settings), startingBankroll: 200_000, payouts: Object.fromEntries(Object.entries(state.games).map(([gameId, game]) => [gameId, game.payout])) };
+      fresh.gameNightArchives = [];
+      fresh.ledger = TEAM_IDS.map((teamId) => ({ id: `opening-${seasonId}-${teamId}`, teamId, amount: 200_000, type: "opening-grant" as const, description: "Opening bankroll for new season", createdAt: startedAt, actorId, seasonId, reason: action.reason }));
+      fresh.economySeasons = [{ id: seasonId, startedAt, actorId, reason: action.reason, priorBalances: structuredClone(state.balances), newBalances: structuredClone(fresh.balances), ledgerEntryIds: fresh.ledger.map((entry) => entry.id) }];
+      return fresh;
+    }
     case "START_ECONOMY_SEASON": {
       requireThat(!state.gameNight || state.gameNight.status === "ended", "End the active game night before starting a new economy season.");
       requireThat(state.events.every((event) => ["completed", "cancelled"].includes(event.status)), "Close or void every prior round before starting a new economy season.");

@@ -307,6 +307,24 @@ describe("Commissioner corrections and finale", () => {
     expect(s.gameNightArchives![0].finalSnapshot).toEqual(snapshot);
     error(() => applyAction(s, { type: "CANCEL_EVENT", eventId }, "jimmy"), 409); reconcile(s);
   });
+  it("resets closed game and rating history for a fresh season", () => {
+    let s = live(); const eventId = s.events[0].id;
+    s = applyAction(s, { type: "START_MATCH", eventId }, "jimmy");
+    s = applyAction(s, { type: "SETTLE_TEAM_EVENT", eventId, winningTeamId: "jason-ezra" }, "jason");
+    s = applyAction(s, { type: "END_GAME_NIGHT" }, "jimmy");
+    expect(getGameRecords(s, "smash").some((record) => record.rating !== 1000 || record.wins !== 0 || record.losses !== 0)).toBe(true);
+    const reset = applyAction(s, { type: "RESET_SEASON", seasonId: "production-season-1", reason: "Remove testing history before live game nights" }, "jimmy");
+    expect(reset.gameNight).toBeUndefined();
+    expect(reset.gameNightArchives).toEqual([]);
+    expect(reset.events).toEqual([]);
+    expect(reset.bets).toEqual([]);
+    expect(reset.bankAdjustments).toEqual([]);
+    TEAM_IDS.forEach((teamId) => expect(reset.balances[teamId]).toBe(200_000));
+    expect(getGameRecords(reset, "smash").every((record) => record.rating === 1000 && record.wins === 0 && record.losses === 0)).toBe(true);
+    expect(reset.economySeasons?.[0]).toMatchObject({ id: "production-season-1", reason: "Remove testing history before live game nights" });
+    expect(new Set(reset.ledger.map((entry) => entry.id)).size).toBe(4);
+    expect(reset.ledger.every((entry) => entry.type === "opening-grant" && entry.amount === 200_000)).toBe(true);
+  });
   it("refuses unsafe legacy reversals and permits debt without allowing unaffordable bets", () => {
     let s = live(); const eventId = s.events[0].id;
     s = applyAction(s, { type: "PLACE_BET", eventId, selectionId: "jason-ezra", stake: 100_000 }, "bruce");
