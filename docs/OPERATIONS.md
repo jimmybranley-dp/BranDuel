@@ -35,7 +35,11 @@ npm run deploy:production -- --confirm-target branduel-production/production/bra
 npm run secret:put:production -- --confirm-target branduel-production/production/branduel-production/secret-put
 ```
 
-They execute no production command locally. Any real production operation needs an external protected mechanism with a human reviewer; that workflow is not present in this repository.
+They execute no production command locally. Real production releases use the protected GitHub Actions workflow `.github/workflows/deploy-production.yml`: it verifies the selected `main` commit, pauses on the GitHub `production` environment for human approval, applies additive migrations, deploys the Worker and assets, and checks the production root and `/api/health` endpoint.
+
+Before the first release, configure the GitHub `production` environment with a `main` branch restriction and a required human reviewer. Store only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as environment secrets, using a least-privilege Cloudflare token. Keep `PLAYER_PASSCODES` as a Cloudflare Worker secret; never put it in GitHub, the repository, or workflow output.
+
+To release, open Actions → Deploy production, run it from `main`, wait for the `production` approval gate, and approve only after the staging rehearsal and release commit are confirmed. The workflow serializes production deployments so two releases cannot run concurrently. Afterward, complete the authenticated commissioner checklist below before inviting players.
 
 ## Migrations
 

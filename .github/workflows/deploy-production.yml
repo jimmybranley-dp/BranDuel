@@ -1,0 +1,81 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected main commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium and required system dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Run canonical release verification
+        run: npm run verify:full -- --full-matrix
+
+  deploy:
+    name: Deploy approved release
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://branduel.jimmybranley.com
+    steps:
+      - name: Check out verified main commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release bundle
+        run: npm run build
+
+      - name: Check release artifacts
+        run: npm run check:artifacts
+
+      - name: Apply additive production migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 migrations apply branduel-production --remote --env production --config wrangler.jsonc
+
+      - name: Deploy Worker and assets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy --env production --config wrangler.jsonc
+
+      - name: Verify production health
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-delay 2 https://branduel.jimmybranley.com/ > /dev/null
+          curl --fail --silent --show-error --retry 5 --retry-delay 2 https://branduel.jimmybranley.com/api/health | grep -F '"ok":true'
