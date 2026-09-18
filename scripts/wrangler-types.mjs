@@ -83,6 +83,14 @@ export async function runWranglerTypes(argv = process.argv.slice(2)) {
       console.log(`Types at ${output} are up to date.`);
       return 0;
     }
+    const existingLines = (existing ?? "").split("\n");
+    const generatedLines = generated.split("\n");
+    const firstDifference = generatedLines.findIndex(
+      (line, index) => existingLines[index] !== line,
+    );
+    console.error(
+      `First generated binding difference at line ${firstDifference + 1}: existing=${JSON.stringify(existingLines[firstDifference] ?? "<missing>")} generated=${JSON.stringify(generatedLines[firstDifference] ?? "<missing>")}`,
+    );
     console.error(
       `Types at ${output} are out of date. Run \`wrangler types\` to regenerate.`,
     );
