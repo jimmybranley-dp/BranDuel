@@ -309,12 +309,12 @@ export function checkArchitecture({ rootDir = ROOT, files, roles = {} } = {}) {
     }
 
     if (file === "worker/index.ts" || role.kind === "Worker/API") {
-      if (!/\bparseAction\s*\(\s*data\.action\s*\)/.test(source)) {
+      if (!/\bparseAction\s*\(\s*data\.action(?:\s*,[^\n]*)?\)/.test(source)) {
         addFailure(
           failures,
           file,
           "Worker request input does not pass through parseAction(data.action)",
-          "parse and runtime-validate the untrusted action immediately before applyAction",
+          "parse and runtime-validate the untrusted action with parseAction immediately before applyAction",
         );
       }
       if (/\bapplyAction\s*\([^,]+,\s*data\.action\b/.test(source)) {
