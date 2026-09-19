@@ -161,7 +161,8 @@ async function handleAction(request: Request, env: Env, actorId: PlayerId) {
     context.errorCode = "LEGACY_REQUEST";
     return observeAction(failure("This request predates verified receipts. Jimmy must reconcile its original change before submitting a new request.", "LEGACY_REQUEST", 409), context, "rejected");
   }
-  const action = parseAction(data.action);
+  const validationState = await getState(env.DB);
+  const action = parseAction(data.action, Object.keys(validationState.state.games));
   context.actionType = action.type;
   for (let attempt = 0; attempt < 5; attempt++) {
     context.attempt = attempt + 1;
